@@ -1,0 +1,472 @@
+---
+- name: Install single-node Kubernetes 1.34 cluster with GPU time-slicing
+  hosts: k8s
+  become: true
+  vars:
+    k8s_version: "1.34"
+    pod_network_cidr: "10.244.0.0/16"
+    cri_socket: "unix:///var/run/containerd/containerd.sock"
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+    arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+  tasks:
+    # ── Reset existing cluster ─────────────────────────────────────
+    - name: Reset existing kubeadm cluster
+      command: kubeadm reset -f
+      failed_when: false
+      changed_when: true
+
+    - name: Remove old kubeconfig
+      file:
+        path: "{{ kubeconfig }}"
+        state: absent
+
+    - name: Clean up CNI config
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    # ── Prerequisites ──────────────────────────────────────────────
+    - name: Disable swap
+      command: swapoff -a
+      changed_when: true
+
+    - name: Remove swap from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '\sswap\s'
+        state: absent
+
+    - name: Load required kernel modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist kernel modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Set sysctl params for Kubernetes
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: true
+      loop:
+        - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+        - { key: "net.ipv4.ip_forward", value: "1" }
+
+    # ── Containerd (from Docker repo) ──────────────────────────────
+    - name: Install base dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - socat
+          - conntrack
+        state: present
+        update_cache: true
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+        gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: "deb [arch={{ arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+
+    - name: Install containerd.io
+      apt:
+        name: containerd.io
+        state: present
+        update_cache: true
+
+    - name: Generate default containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+      changed_when: true
+
+    - name: Enable SystemdCgroup in containerd
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Configure NVIDIA runtime in containerd
+      command: nvidia-ctk runtime configure --runtime=containerd --set-as-default
+
+    - name: Restart and enable containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    # ── Kubernetes 1.34 packages ───────────────────────────────────
+    - name: Remove old Kubernetes apt sources
+      file:
+        path: /etc/apt/sources.list.d/kubernetes.list
+        state: absent
+
+    - name: Remove old Kubernetes apt key
+      file:
+        path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        state: absent
+
+    - name: Add Kubernetes 1.34 apt key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key | \
+        gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes 1.34 apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /\n"
+
+    - name: Unhold old Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: install
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+      failed_when: false
+
+    - name: Install kubeadm, kubelet, kubectl 1.34
+      apt:
+        name:
+          - kubeadm
+          - kubelet
+          - kubectl
+        state: latest
+        update_cache: true
+        allow_change_held_packages: true
+
+    - name: Hold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+
+    - name: Enable kubelet service
+      systemd:
+        name: kubelet
+        enabled: true
+
+    # ── kubeadm init ───────────────────────────────────────────────
+    - name: Initialize Kubernetes 1.34 cluster
+      command: >
+        kubeadm init
+        --pod-network-cidr={{ pod_network_cidr }}
+        --cri-socket={{ cri_socket }}
+      register: kubeadm_init
+
+    - name: Display kubeadm init output
+      debug:
+        var: kubeadm_init.stdout_lines
+
+    # ── kubeconfig for local user ──────────────────────────────────
+    - name: Create .kube directory for user
+      file:
+        path: "/home/{{ local_user }}/.kube"
+        state: directory
+        owner: "{{ local_user }}"
+        group: "{{ local_user }}"
+        mode: '0755'
+
+    - name: Copy admin kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ kubeconfig }}"
+        remote_src: true
+        owner: "{{ local_user }}"
+        group: "{{ local_user }}"
+        mode: '0600'
+
+    # ── Pod network (Flannel) ──────────────────────────────────────
+    - name: Install Flannel CNI
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ── Untaint control plane (worker + control-plane) ─────────────
+    - name: Remove control-plane taint for single-node cluster
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane- --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      failed_when: false
+
+    # ── Wait for node ready ────────────────────────────────────────
+    - name: Wait for node to be Ready
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: node_status
+      retries: 30
+      delay: 10
+      until: node_status.stdout == "True"
+
+    # ── Install Helm ───────────────────────────────────────────────
+    - name: Install Helm
+      shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    # ── NVIDIA GPU Operator ────────────────────────────────────────
+    - name: Add NVIDIA Helm repo
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: helm_repo
+      changed_when: "'has been added' in helm_repo.stdout"
+      failed_when: false
+
+    - name: Update Helm repos
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm repo update
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Create time-slicing ConfigMap
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: time-slicing-config
+          namespace: gpu-operator
+        data:
+          any: |-
+            version: v1
+            sharing:
+              timeSlicing:
+                renameByDefault: false
+                failRequestsGreaterThanOne: false
+                resources:
+                  - name: nvidia.com/gpu
+                    replicas: 4
+        EOF
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Install NVIDIA GPU Operator with device plugin and time-slicing
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        helm upgrade --install gpu-operator nvidia/gpu-operator \
+          --namespace gpu-operator \
+          --create-namespace \
+          --set driver.enabled=false \
+          --set toolkit.enabled=false \
+          --set devicePlugin.enabled=true \
+          --set devicePlugin.config.name=time-slicing-config \
+          --set devicePlugin.config.default=any \
+          --set migManager.enabled=false \
+          --set operator.defaultRuntime=containerd \
+          --wait --timeout 10m
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for GPU Operator pods to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n gpu-operator wait --for=condition=Ready pods --all --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      retries: 6
+      delay: 30
+      register: gpu_op_wait
+      until: gpu_op_wait.rc == 0
+
+    - name: Verify GPU resources are advertised
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl get node -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: gpu_count
+      retries: 20
+      delay: 15
+      until: gpu_count.stdout | int > 0
+
+    - name: Show allocatable GPUs
+      debug:
+        msg: "Allocatable GPU slots: {{ gpu_count.stdout }} (time-sliced from 1 physical GPU)"
+
+    # ── GPU Sharing Test ───────────────────────────────────────────
+    - name: Create gpu-test namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl create namespace gpu-test --dry-run=client -o yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ns_yaml
+
+    - name: Apply gpu-test namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl apply -f -
+      args:
+        stdin: "{{ ns_yaml.stdout }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Deploy GPU sharing test (2 pods each requesting 1 GPU time-slice)
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        cat <<'EOF' | kubectl apply -f -
+        ---
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: gpu-test-pod-1
+          namespace: gpu-test
+        spec:
+          containers:
+          - name: cuda
+            image: nvidia/cuda:13.0.0-base-ubuntu24.04
+            command: ["sh", "-c", "nvidia-smi && echo 'GPU-TEST-POD-1: SUCCESS' && sleep 3600"]
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+          restartPolicy: Never
+        ---
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: gpu-test-pod-2
+          namespace: gpu-test
+        spec:
+          containers:
+          - name: cuda
+            image: nvidia/cuda:13.0.0-base-ubuntu24.04
+            command: ["sh", "-c", "nvidia-smi && echo 'GPU-TEST-POD-2: SUCCESS' && sleep 3600"]
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+          restartPolicy: Never
+        EOF
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for GPU test pods to be running
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n gpu-test wait --for=condition=Ready pod/gpu-test-pod-1 pod/gpu-test-pod-2 --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      retries: 6
+      delay: 20
+      register: test_pods_wait
+      until: test_pods_wait.rc == 0
+
+    - name: Get logs from GPU test pod 1
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl -n gpu-test logs gpu-test-pod-1
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod1_logs
+
+    - name: Get logs from GPU test pod 2
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl -n gpu-test logs gpu-test-pod-2
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod2_logs
+
+    - name: Show GPU test results
+      debug:
+        msg: |
+          === Pod 1 Logs ===
+          {{ pod1_logs.stdout }}
+
+          === Pod 2 Logs ===
+          {{ pod2_logs.stdout }}
+
+    - name: Verify both pods see the same GPU
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        UUID1=$(kubectl -n gpu-test exec gpu-test-pod-1 -- nvidia-smi -L 2>/dev/null | grep UUID | head -1)
+        UUID2=$(kubectl -n gpu-test exec gpu-test-pod-2 -- nvidia-smi -L 2>/dev/null | grep UUID | head -1)
+        echo "Pod 1 GPU: $UUID1"
+        echo "Pod 2 GPU: $UUID2"
+        if [ "$UUID1" = "$UUID2" ] && [ -n "$UUID1" ]; then
+          echo "PASS: Both pods share the same GPU"
+        else
+          echo "FAIL: GPUs do not match or not accessible"
+          exit 1
+        fi
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: gpu_share_test
+
+    - name: Show GPU sharing test result
+      debug:
+        var: gpu_share_test.stdout_lines
+
+    # ── Final status ───────────────────────────────────────────────
+    - name: Show final cluster status
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        echo "=== Kubernetes Version ==="
+        kubectl version
+        echo ""
+        echo "=== Nodes ==="
+        kubectl get nodes -o wide
+        echo ""
+        echo "=== All Pods ==="
+        kubectl get pods -A
+        echo ""
+        echo "=== GPU Resources ==="
+        kubectl get node -o jsonpath='{.items[0].status.allocatable}' | python3 -m json.tool
+        echo ""
+        echo "=== GPU Test Pods ==="
+        kubectl get pods -n gpu-test -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: final_status
+
+    - name: Display final status
+      debug:
+        var: final_status.stdout_lines
