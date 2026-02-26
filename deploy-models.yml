@@ -5,40 +5,27 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
-    models_dir: "/misc/models"
+    ollama_data_dir: "/models/ollama-data"
     chart_dir: "{{ playbook_dir }}/charts/llm-serving"
-    # Set to true to use KServe InferenceService, false for plain Deployments
-    use_kserve: true
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
 
   tasks:
-    # ── Verify models are downloaded ──────────────────────────────
-    - name: Check Qwen3-Coder-Next weights exist
+    # ── Verify models are downloaded ─────────────────────────────
+    - name: Check Ollama model data exists
       find:
-        paths: "{{ models_dir }}/qwen3-coder-next"
-        patterns: "*Q4_K_M*.gguf"
-      register: qwen_files
+        paths: "{{ ollama_data_dir }}"
+        file_type: directory
+      register: ollama_dirs
 
-    - name: Check DeepSeek-R1-Distill weights exist
-      find:
-        paths: "{{ models_dir }}/deepseek-r1-distill-32b"
-        patterns: "*Q4_K_M*.gguf"
-      register: deepseek_files
-
-    - name: Fail if models not downloaded
-      fail:
-        msg: >
-          Model weights not found. Run download-models.yml first:
-          ansible-playbook -i inventory.ini download-models.yml --become
-      when: qwen_files.matched == 0 or deepseek_files.matched == 0
-
-    - name: Show found model files
+    - name: Warn if models not downloaded
       debug:
-        msg:
-          - "Qwen3: {{ qwen_files.files | map(attribute='path') | list }}"
-          - "DeepSeek: {{ deepseek_files.files | map(attribute='path') | list }}"
+        msg: >
+          No model data found at {{ ollama_data_dir }}.
+          Models will be pulled on first pod start (slow).
+          Run download-models.yml first for instant deploys.
+      when: ollama_dirs.matched == 0
 
     # ── Install cert-manager (KServe prerequisite) ────────────────
     - name: Add Jetstack Helm repo
@@ -129,7 +116,7 @@
         helm upgrade --install llm-serving {{ chart_dir }} \
           --namespace llm-serving \
           --create-namespace \
-          --set modelsHostPath={{ models_dir }} \
+          --set ollamaDataHostPath={{ ollama_data_dir }} \
           --wait --timeout 15m
       register: chart_install
 
@@ -144,44 +131,26 @@
       register: pods_ready
       until: pods_ready.rc == 0
 
-    # ── Verify endpoints ──────────────────────────────────────────
-    - name: Wait for Ollama to load models
-      pause:
-        seconds: 30
-
-    - name: Verify Qwen3-Coder-Next is serving
+    # ── Verify models are registered ─────────────────────────────
+    - name: Verify Qwen3-Coder-Next model is registered
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n llm-serving exec deploy/qwen3-coder-next -- \
-          curl -s http://localhost:11434/api/tags | python3 -c "
-        import sys,json
-        tags = json.load(sys.stdin)
-        models = [m['name'] for m in tags.get('models',[])]
-        print('Loaded models:', models)
-        assert len(models) > 0, 'No models loaded'
-        "
+        kubectl -n llm-serving exec deploy/qwen3-coder-next-predictor -- ollama list
       register: qwen_verify
       retries: 12
       delay: 15
-      until: qwen_verify.rc == 0
+      until: qwen_verify.rc == 0 and 'qwen3-coder-next' in qwen_verify.stdout
 
-    - name: Verify DeepSeek-R1 is serving
+    - name: Verify DeepSeek-R1 model is registered
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n llm-serving exec deploy/deepseek-r1-distill-32b -- \
-          curl -s http://localhost:11434/api/tags | python3 -c "
-        import sys,json
-        tags = json.load(sys.stdin)
-        models = [m['name'] for m in tags.get('models',[])]
-        print('Loaded models:', models)
-        assert len(models) > 0, 'No models loaded'
-        "
+        kubectl -n llm-serving exec deploy/deepseek-r1-distill-32b-predictor -- ollama list
       register: deepseek_verify
       retries: 12
       delay: 15
-      until: deepseek_verify.rc == 0
+      until: deepseek_verify.rc == 0 and 'deepseek-r1-distill-32b' in deepseek_verify.stdout
 
     - name: Show deployment status
       become: true
@@ -190,20 +159,18 @@
         echo "=== LLM Serving Pods ==="
         kubectl get pods -n llm-serving -o wide
         echo ""
-        echo "=== Services ==="
-        kubectl get svc -n llm-serving
-        echo ""
         echo "=== InferenceServices ==="
-        kubectl get inferenceservice -n llm-serving 2>/dev/null || echo "(KServe InferenceServices not deployed)"
+        kubectl get inferenceservice -n llm-serving
         echo ""
-        echo "=== Endpoints ==="
-        echo "Qwen3-Coder-Next:      http://qwen3-coder-next.llm-serving.svc.cluster.local:11434"
-        echo "DeepSeek-R1-Distill:   http://deepseek-r1-distill-32b.llm-serving.svc.cluster.local:11434"
+        echo "=== Loaded Models ==="
+        echo "Qwen3:"
+        kubectl -n llm-serving exec deploy/qwen3-coder-next-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo "DeepSeek:"
+        kubectl -n llm-serving exec deploy/deepseek-r1-distill-32b-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
         echo ""
-        echo "=== Usage ==="
-        echo 'curl http://qwen3-coder-next.llm-serving.svc.cluster.local:11434/v1/chat/completions \'
-        echo '  -H "Content-Type: application/json" \'
-        echo '  -d '"'"'{"model":"qwen3-coder-next","messages":[{"role":"user","content":"Write hello world in Python"}]}'"'"''
+        echo "=== Cluster Endpoints ==="
+        echo "Qwen3-Coder-Next:    http://qwen3-coder-next-predictor.llm-serving.svc.cluster.local:11434"
+        echo "DeepSeek-R1-Distill: http://deepseek-r1-distill-32b-predictor.llm-serving.svc.cluster.local:11434"
       register: status
 
     - name: Display status

@@ -1,0 +1,37 @@
+---
+- name: Remove LLM model deployment
+  hosts: k8s
+  become: true
+  vars:
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    - name: Check if llm-serving Helm release exists
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm status llm-serving -n llm-serving
+      register: release_status
+      failed_when: false
+      changed_when: false
+
+    - name: Uninstall llm-serving Helm release
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm uninstall llm-serving -n llm-serving
+      when: release_status.rc == 0
+
+    - name: Delete llm-serving namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl delete namespace llm-serving --timeout=60s
+      register: ns_delete
+      failed_when: false
+      when: release_status.rc == 0
+
+    - name: Show result
+      debug:
+        msg: "LLM model deployment removed. Model data on disk is preserved."
