@@ -11,21 +11,44 @@
     arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
 
   tasks:
-    # ── Reset existing cluster ─────────────────────────────────────
+    # ── Detect existing cluster ───────────────────────────────────
+    - name: Check if cluster is already running
+      command: kubectl get nodes --no-headers
+      become: true
+      become_user: "{{ local_user }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: cluster_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set cluster_running fact
+      set_fact:
+        cluster_running: "{{ cluster_check.rc == 0 and 'Ready' in cluster_check.stdout }}"
+
+    - name: Skip message
+      debug:
+        msg: "Existing cluster detected — skipping reset and init"
+      when: cluster_running
+
+    # ── Reset existing cluster (only if not running) ──────────────
     - name: Reset existing kubeadm cluster
       command: kubeadm reset -f
       failed_when: false
       changed_when: true
+      when: not cluster_running
 
     - name: Remove old kubeconfig
       file:
         path: "{{ kubeconfig }}"
         state: absent
+      when: not cluster_running
 
     - name: Clean up CNI config
       file:
         path: /etc/cni/net.d
         state: absent
+      when: not cluster_running
 
     # ── Prerequisites ──────────────────────────────────────────────
     - name: Disable swap
@@ -104,6 +127,7 @@
     - name: Generate default containerd config
       shell: containerd config default > /etc/containerd/config.toml
       changed_when: true
+      when: not cluster_running
 
     - name: Enable SystemdCgroup in containerd
       replace:
@@ -111,8 +135,20 @@
         regexp: 'SystemdCgroup = false'
         replace: 'SystemdCgroup = true'
 
+    - name: Install CNI plugins
+      shell: |
+        CNI_VERSION=$(curl -fsSL https://api.github.com/repos/containernetworking/plugins/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+        ARCH={{ arch }}
+        mkdir -p /opt/cni/bin
+        curl -fsSL -o /tmp/cni-plugins.tgz "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz"
+        tar -C /opt/cni/bin -xzf /tmp/cni-plugins.tgz
+        rm -f /tmp/cni-plugins.tgz
+      args:
+        creates: /opt/cni/bin/loopback
+
     - name: Configure NVIDIA runtime in containerd
       command: nvidia-ctk runtime configure --runtime=containerd --set-as-default
+      when: not cluster_running
 
     - name: Restart and enable containerd
       systemd:
@@ -120,22 +156,15 @@
         state: restarted
         enabled: true
         daemon_reload: true
+      when: not cluster_running
 
     # ── Kubernetes 1.34 packages ───────────────────────────────────
-    - name: Remove old Kubernetes apt sources
-      file:
-        path: /etc/apt/sources.list.d/kubernetes.list
-        state: absent
-
-    - name: Remove old Kubernetes apt key
-      file:
-        path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-        state: absent
-
     - name: Add Kubernetes 1.34 apt key
       shell: |
         curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key | \
         gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
     - name: Add Kubernetes 1.34 apt repository
       copy:
@@ -151,6 +180,7 @@
         - kubelet
         - kubectl
       failed_when: false
+      when: not cluster_running
 
     - name: Install kubeadm, kubelet, kubectl 1.34
       apt:
@@ -158,9 +188,8 @@
           - kubeadm
           - kubelet
           - kubectl
-        state: latest
+        state: present
         update_cache: true
-        allow_change_held_packages: true
 
     - name: Hold Kubernetes packages
       dpkg_selections:
@@ -176,17 +205,19 @@
         name: kubelet
         enabled: true
 
-    # ── kubeadm init ───────────────────────────────────────────────
+    # ── kubeadm init (skip if cluster running) ─────────────────────
     - name: Initialize Kubernetes 1.34 cluster
       command: >
         kubeadm init
         --pod-network-cidr={{ pod_network_cidr }}
         --cri-socket={{ cri_socket }}
       register: kubeadm_init
+      when: not cluster_running
 
     - name: Display kubeadm init output
       debug:
         var: kubeadm_init.stdout_lines
+      when: not cluster_running and kubeadm_init is changed
 
     # ── kubeconfig for local user ──────────────────────────────────
     - name: Create .kube directory for user
@@ -259,6 +290,23 @@
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
+    - name: Create gpu-operator namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl create namespace gpu-operator --dry-run=client -o yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: gpu_op_ns
+
+    - name: Apply gpu-operator namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl apply -f -
+      args:
+        stdin: "{{ gpu_op_ns.stdout }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
     - name: Create time-slicing ConfigMap
       become: true
       become_user: "{{ local_user }}"
@@ -305,7 +353,8 @@
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n gpu-operator wait --for=condition=Ready pods --all --timeout=300s
+        kubectl -n gpu-operator get pods --field-selector=status.phase=Running -o name | \
+        xargs -r kubectl -n gpu-operator wait --for=condition=Ready --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       retries: 6

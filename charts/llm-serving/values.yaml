@@ -1,0 +1,48 @@
+# Use KServe InferenceService (true) or plain Deployments (false)
+kserve: true
+
+namespace: llm-serving
+
+modelsHostPath: /misc/models
+
+# On DGX Spark (GB10 unified memory), GPU VRAM and system memory share
+# the same 128GB pool. Pod memory limits must cover model weights,
+# KV cache, and Ollama overhead since they all count against the cgroup.
+
+models:
+  qwen3-coder-next:
+    enabled: true
+    image: ollama/ollama:latest
+    # Use official Ollama registry model (unsloth GGUF has SSM tensor issue)
+    ollamaPull: "qwen3-coder-next:q4_K_M"
+    displayName: qwen3-coder-next
+    port: 11434
+    resources:
+      requests:
+        cpu: "4"
+        memory: 55Gi
+      limits:
+        cpu: "10"
+        memory: 72Gi
+        nvidia.com/gpu: "1"
+    numParallel: "2"
+
+  deepseek-r1-distill-32b:
+    enabled: true
+    image: ollama/ollama:latest
+    ggufPath: /models/deepseek-r1-distill-32b
+    ggufFile: DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf
+    displayName: deepseek-r1-distill-32b
+    port: 11434
+    resources:
+      requests:
+        cpu: "4"
+        memory: 42Gi
+      limits:
+        cpu: "10"
+        memory: 48Gi
+        nvidia.com/gpu: "1"
+    numParallel: "4"
+
+nodeSelector:
+  kubernetes.io/arch: arm64

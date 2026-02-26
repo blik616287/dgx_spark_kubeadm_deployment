@@ -1,0 +1,75 @@
+{{- if .Values.kserve }}
+{{- range $name, $model := .Values.models }}
+{{- if $model.enabled }}
+---
+apiVersion: "serving.kserve.io/v1beta1"
+kind: "InferenceService"
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    {{- with $.Values.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    runtimeClassName: nvidia
+    containers:
+      - name: kserve-container
+        image: {{ $model.image }}
+        ports:
+          - containerPort: {{ $model.port }}
+            name: http
+            protocol: TCP
+        env:
+          - name: OLLAMA_HOST
+            value: "0.0.0.0:{{ $model.port }}"
+          - name: OLLAMA_NUM_PARALLEL
+            value: {{ $model.numParallel | quote }}
+          - name: OLLAMA_MODELS
+            value: /root/.ollama
+          - name: OLLAMA_KEEP_ALIVE
+            value: "-1"
+          - name: OLLAMA_FLASH_ATTENTION
+            value: "1"
+        resources:
+          {{- toYaml $model.resources | nindent 10 }}
+        volumeMounts:
+          {{- if $model.ggufFile }}
+          - name: models
+            mountPath: {{ $model.ggufPath }}
+            readOnly: true
+          {{- end }}
+          - name: ollama-data
+            mountPath: /root/.ollama
+        lifecycle:
+          postStart:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  {{- if $model.ollamaPull }}
+                  until ollama list >/dev/null 2>&1; do sleep 1; done
+                  ollama pull {{ $model.ollamaPull }}
+                  {{- else }}
+                  sleep 5
+                  cat <<'MODELFILE' > /tmp/Modelfile
+                  FROM {{ $model.ggufPath }}/{{ $model.ggufFile }}
+                  MODELFILE
+                  ollama create {{ $model.displayName }} -f /tmp/Modelfile
+                  {{- end }}
+    volumes:
+      {{- if $model.ggufFile }}
+      - name: models
+        hostPath:
+          path: {{ $.Values.modelsHostPath }}/{{ $name }}
+          type: Directory
+      {{- end }}
+      - name: ollama-data
+        emptyDir: {}
+{{- end }}
+{{- end }}
+{{- end }}

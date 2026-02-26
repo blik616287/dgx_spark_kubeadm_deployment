@@ -1,0 +1,106 @@
+{{- if not .Values.kserve }}
+{{- range $name, $model := .Values.models }}
+{{- if $model.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+    spec:
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      runtimeClassName: nvidia
+      initContainers:
+        - name: setup-model
+          image: {{ $model.image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Start ollama in the background
+              ollama serve &
+              sleep 5
+              # Create model from local GGUF
+              cat <<'MODELFILE' > /tmp/Modelfile
+              FROM {{ $model.ggufPath }}/{{ $model.ggufFile }}
+              MODELFILE
+              ollama create {{ $model.displayName }} -f /tmp/Modelfile
+              # Stop ollama
+              kill %1 2>/dev/null || true
+              echo "Model {{ $model.displayName }} registered"
+          env:
+            - name: OLLAMA_MODELS
+              value: /root/.ollama
+          volumeMounts:
+            - name: models
+              mountPath: {{ $model.ggufPath }}
+              readOnly: true
+            - name: ollama-data
+              mountPath: /root/.ollama
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+      containers:
+        - name: ollama
+          image: {{ $model.image }}
+          ports:
+            - containerPort: {{ $model.port }}
+              name: http
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:{{ $model.port }}"
+            - name: OLLAMA_NUM_PARALLEL
+              value: {{ $model.numParallel | quote }}
+            - name: OLLAMA_MODELS
+              value: /root/.ollama
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+          resources:
+            {{- toYaml $model.resources | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: {{ $model.ggufPath }}
+              readOnly: true
+            - name: ollama-data
+              mountPath: /root/.ollama
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: {{ $model.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: {{ $model.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: models
+          hostPath:
+            path: {{ $.Values.modelsHostPath }}/{{ $name }}
+            type: Directory
+        - name: ollama-data
+          emptyDir: {}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,22 @@
+{{- if not .Values.kserve }}
+{{- range $name, $model := .Values.models }}
+{{- if $model.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  selector:
+    app: {{ $name }}
+  ports:
+    - port: {{ $model.port }}
+      targetPort: {{ $model.port }}
+      name: http
+  type: ClusterIP
+{{- end }}
+{{- end }}
+{{- end }}

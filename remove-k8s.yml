@@ -1,0 +1,119 @@
+---
+- name: Remove single-node Kubernetes cluster
+  hosts: k8s
+  become: true
+  vars:
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+
+  tasks:
+    - name: Drain node
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        [ -n "$NODE" ] && kubectl drain "$NODE" --delete-emptydir-data --force --ignore-daemonsets --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      failed_when: false
+
+    - name: Uninstall Helm releases
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        for ns in $(helm list -A -q 2>/dev/null); do
+          helm uninstall "$ns" -n "$(helm list -A --filter "$ns" -o json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['namespace'])")" 2>/dev/null
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      failed_when: false
+
+    - name: Reset kubeadm
+      command: kubeadm reset -f
+      failed_when: false
+
+    - name: Remove kubeconfig
+      file:
+        path: "{{ kubeconfig }}"
+        state: absent
+
+    - name: Remove CNI config
+      file:
+        path: /etc/cni/net.d
+        state: absent
+
+    - name: Remove CNI binaries
+      file:
+        path: /opt/cni/bin
+        state: absent
+
+    - name: Remove Kubernetes manifests
+      file:
+        path: /etc/kubernetes
+        state: absent
+
+    - name: Remove kubelet data
+      file:
+        path: /var/lib/kubelet
+        state: absent
+
+    - name: Remove etcd data
+      file:
+        path: /var/lib/etcd
+        state: absent
+
+    - name: Unhold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: install
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+      failed_when: false
+
+    - name: Remove Kubernetes packages
+      apt:
+        name:
+          - kubeadm
+          - kubelet
+          - kubectl
+        state: absent
+        purge: true
+
+    - name: Remove Kubernetes apt repo and key
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/kubernetes.list
+        - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Remove Helm
+      file:
+        path: /usr/local/bin/helm
+        state: absent
+
+    - name: Clean up iptables rules
+      shell: |
+        iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+        ip6tables -F && ip6tables -t nat -F && ip6tables -t mangle -F && ip6tables -X
+      failed_when: false
+
+    - name: Remove flannel interface
+      command: ip link delete flannel.1
+      failed_when: false
+
+    - name: Remove cni0 interface
+      command: ip link delete cni0
+      failed_when: false
+
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+      failed_when: false
+
+    - name: Show cleanup result
+      debug:
+        msg: "Kubernetes cluster removed. Containerd and NVIDIA runtime are still installed."

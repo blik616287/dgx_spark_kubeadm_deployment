@@ -1,0 +1,50 @@
+---
+- name: Download LLM model weights
+  hosts: k8s
+  become: true
+  vars:
+    models_dir: "/misc/models"
+    models:
+      - name: qwen3-coder-next
+        repo: "unsloth/Qwen3-Coder-Next-GGUF"
+        pattern: "*Q4_K_M*"
+      - name: deepseek-r1-distill-32b
+        repo: "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF"
+        pattern: "*Q4_K_M*"
+
+  tasks:
+    - name: Install uv
+      shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+      args:
+        creates: /root/.local/bin/uv
+      environment:
+        UV_INSTALL_DIR: /usr/local/bin
+
+    - name: Install huggingface-hub via uv
+      command: uv tool install huggingface-hub
+      args:
+        creates: /root/.local/bin/hf
+
+    - name: Create models directory
+      file:
+        path: "{{ models_dir }}/{{ item.name }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ models }}"
+
+    - name: Download model weights
+      command: >
+        /root/.local/bin/hf download {{ item.repo }}
+        --include "{{ item.pattern }}"
+        --local-dir {{ models_dir }}/{{ item.name }}
+      loop: "{{ models }}"
+      register: download_result
+      changed_when: "'Fetching' in download_result.stderr or 'Downloading' in download_result.stderr"
+
+    - name: Show downloaded files
+      shell: "find {{ models_dir }} -name '*.gguf' | xargs ls -lh"
+      register: files
+
+    - name: Display model files
+      debug:
+        var: files.stdout_lines
