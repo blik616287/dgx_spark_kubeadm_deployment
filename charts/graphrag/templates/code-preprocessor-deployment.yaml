@@ -1,0 +1,48 @@
+{{- if .Values.codePreprocessor.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-preprocessor
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: code-preprocessor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: code-preprocessor
+  template:
+    metadata:
+      labels:
+        app: code-preprocessor
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      containers:
+        - name: code-preprocessor
+          image: {{ .Values.codePreprocessor.image }}
+          imagePullPolicy: Never
+          ports:
+            - containerPort: {{ .Values.codePreprocessor.port }}
+              name: http
+          env:
+            - name: LIGHTRAG_URL
+              value: "http://lightrag.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.lightrag.port }}"
+          resources:
+            {{- toYaml .Values.codePreprocessor.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.codePreprocessor.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.codePreprocessor.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+{{- end }}

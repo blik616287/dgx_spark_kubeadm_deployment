@@ -1,0 +1,14 @@
+{{- if .Values.codePreprocessor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-preprocessor
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: code-preprocessor
+  ports:
+    - port: {{ .Values.codePreprocessor.port }}
+      targetPort: {{ .Values.codePreprocessor.port }}
+      name: http
+{{- end }}

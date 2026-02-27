@@ -1,0 +1,187 @@
+---
+- name: Deploy GraphRAG stack on Kubernetes
+  hosts: k8s
+  become: true
+  vars:
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+    graphrag_data_dir: "/models/graphrag-data"
+    ollama_data_dir: "/models/ollama-data"
+    chart_dir: "{{ playbook_dir }}/charts/graphrag"
+    apps_dir: "{{ playbook_dir }}/apps"
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    # ── Create data directories ────────────────────────────────────
+    - name: Create graphrag data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ graphrag_data_dir }}/neo4j"
+        - "{{ graphrag_data_dir }}/postgresql"
+        - "{{ graphrag_data_dir }}/lightrag"
+        - "{{ graphrag_data_dir }}/lightrag/inputs"
+        - "{{ ollama_data_dir }}/qwen3-embedding"
+        - "{{ ollama_data_dir }}/llama3.1-8b"
+
+    # ── Build container images (nerdctl + buildkit → containerd k8s.io) ─
+    - name: Check if code-preprocessor image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-code-preprocessor | grep -q .
+      register: preprocessor_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build code-preprocessor image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-code-preprocessor:latest {{ apps_dir }}/code-preprocessor/
+      when: preprocessor_image_check.rc != 0
+      timeout: 600
+
+    - name: Check if lightrag image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-lightrag | grep -q .
+      register: lightrag_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build lightrag image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-lightrag:latest {{ apps_dir }}/lightrag/
+      when: lightrag_image_check.rc != 0
+      timeout: 900
+
+    # ── Deploy Helm chart ──────────────────────────────────────────
+    - name: Clean up stuck Helm release if needed
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        status=$(helm status graphrag -n graphrag -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null || echo "absent")
+        if [ "$status" = "pending-install" ] || [ "$status" = "failed" ]; then
+          helm uninstall graphrag -n graphrag 2>/dev/null || true
+          echo "cleaned"
+        else
+          echo "ok"
+        fi
+      register: helm_cleanup
+      changed_when: "'cleaned' in helm_cleanup.stdout"
+
+    - name: Deploy graphrag Helm chart
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        helm upgrade --install graphrag {{ chart_dir }} \
+          --namespace graphrag \
+          --create-namespace \
+          --wait --timeout 15m
+      register: chart_install
+
+    - name: Show Helm install result
+      debug:
+        msg: "{{ chart_install.stdout_lines }}"
+
+    # ── Wait for pods ──────────────────────────────────────────────
+    - name: Wait for Neo4j pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=neo4j --timeout=120s
+      retries: 3
+      delay: 10
+      register: neo4j_ready
+      until: neo4j_ready.rc == 0
+
+    - name: Wait for PostgreSQL pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=postgresql --timeout=120s
+      retries: 3
+      delay: 10
+      register: pg_ready
+      until: pg_ready.rc == 0
+
+    - name: Verify embedding model is loaded
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag exec deploy/ollama-embed -- ollama list
+      retries: 24
+      delay: 15
+      register: embed_verify
+      until: embed_verify.rc == 0 and 'qwen3-embedding' in embed_verify.stdout
+
+    - name: Verify extraction model is loaded
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag exec deploy/ollama-extract -- ollama list
+      retries: 24
+      delay: 15
+      register: extract_verify
+      until: extract_verify.rc == 0 and 'llama3.1' in extract_verify.stdout
+
+    - name: Wait for LightRAG pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=lightrag --timeout=300s
+      retries: 3
+      delay: 15
+      register: lightrag_ready
+      until: lightrag_ready.rc == 0
+
+    - name: Wait for code-preprocessor pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=code-preprocessor --timeout=120s
+      retries: 3
+      delay: 10
+      register: preprocessor_ready
+      until: preprocessor_ready.rc == 0
+
+    # ── Enable pgvector extension ──────────────────────────────────
+    - name: Enable pgvector extension in PostgreSQL
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag exec deploy/postgresql -- \
+          psql -U lightrag -d lightrag -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      register: pgvector_ext
+      changed_when: "'CREATE EXTENSION' in pgvector_ext.stdout"
+
+    # ── Show status ────────────────────────────────────────────────
+    - name: Show deployment status
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        echo "=== GraphRAG Pods ==="
+        kubectl get pods -n graphrag -o wide
+        echo ""
+        echo "=== GraphRAG Services ==="
+        kubectl get svc -n graphrag
+        echo ""
+        echo "=== Loaded Models ==="
+        echo "Embedding:"
+        kubectl -n graphrag exec deploy/ollama-embed -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo "Extraction:"
+        kubectl -n graphrag exec deploy/ollama-extract -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo ""
+        echo "=== Endpoints ==="
+        echo "LightRAG API:         http://localhost:31436"
+        echo "Neo4j Browser:        http://localhost:31474"
+        echo "Code Preprocessor:    http://localhost:31490"
+        echo ""
+        echo "=== Cluster-internal ==="
+        echo "LightRAG:             http://lightrag.graphrag.svc.cluster.local:9621"
+        echo "Neo4j Bolt:           bolt://neo4j.graphrag.svc.cluster.local:7687"
+        echo "PostgreSQL:           postgresql.graphrag.svc.cluster.local:5432"
+        echo "Embedding (Ollama):   http://ollama-embed.graphrag.svc.cluster.local:11434"
+        echo "Extraction (Ollama):  http://ollama-extract.graphrag.svc.cluster.local:11434"
+        echo "Code Preprocessor:    http://code-preprocessor.graphrag.svc.cluster.local:8090"
+      register: status
+
+    - name: Display status
+      debug:
+        var: status.stdout_lines

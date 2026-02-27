@@ -1,0 +1,5 @@
+apiVersion: v2
+name: graphrag
+description: Local GraphRAG stack - LightRAG + Neo4j + pgvector + tree-sitter
+version: 0.1.0
+appVersion: "1.0.0"

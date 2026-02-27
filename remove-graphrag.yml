@@ -1,0 +1,41 @@
+---
+- name: Remove GraphRAG deployment
+  hosts: k8s
+  become: true
+  vars:
+    local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
+    kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
+
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+  tasks:
+    - name: Check if graphrag Helm release exists
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm status graphrag -n graphrag
+      register: release_status
+      failed_when: false
+      changed_when: false
+
+    - name: Uninstall graphrag Helm release
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm uninstall graphrag -n graphrag
+      when: release_status.rc == 0
+
+    - name: Delete graphrag namespace
+      become: true
+      become_user: "{{ local_user }}"
+      command: kubectl delete namespace graphrag --timeout=60s
+      register: ns_delete
+      failed_when: false
+      when: release_status.rc == 0
+
+    - name: Show result
+      debug:
+        msg:
+          - "GraphRAG deployment removed."
+          - "Data preserved at /models/graphrag-data/ (neo4j, postgresql, lightrag)"
+          - "Model data preserved at /models/ollama-data/ (qwen3-embedding, llama3.1-8b)"
+          - "To remove all data: sudo rm -rf /models/graphrag-data/"

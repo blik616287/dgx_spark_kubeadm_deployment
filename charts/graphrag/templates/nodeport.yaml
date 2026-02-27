@@ -1,0 +1,55 @@
+{{- if .Values.lightrag.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightrag-nodeport
+  namespace: {{ .Values.namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: lightrag
+  ports:
+    - port: {{ .Values.lightrag.port }}
+      targetPort: {{ .Values.lightrag.port }}
+      nodePort: {{ .Values.lightrag.nodePort }}
+      name: http
+{{- end }}
+{{- if .Values.neo4j.enabled }}
+{{- if .Values.neo4j.nodePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neo4j-nodeport
+  namespace: {{ .Values.namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: neo4j
+  ports:
+    - port: {{ .Values.neo4j.httpPort }}
+      targetPort: {{ .Values.neo4j.httpPort }}
+      nodePort: {{ .Values.neo4j.nodePort }}
+      name: http
+{{- end }}
+{{- end }}
+{{- if .Values.codePreprocessor.enabled }}
+{{- if .Values.codePreprocessor.nodePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-preprocessor-nodeport
+  namespace: {{ .Values.namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: code-preprocessor
+  ports:
+    - port: {{ .Values.codePreprocessor.port }}
+      targetPort: {{ .Values.codePreprocessor.port }}
+      nodePort: {{ .Values.codePreprocessor.nodePort }}
+      name: http
+{{- end }}
+{{- end }}

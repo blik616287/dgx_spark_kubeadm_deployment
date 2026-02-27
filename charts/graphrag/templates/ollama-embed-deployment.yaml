@@ -1,0 +1,67 @@
+{{- if .Values.embedding.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-embed
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ollama-embed
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama-embed
+  template:
+    metadata:
+      labels:
+        app: ollama-embed
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      containers:
+        - name: ollama
+          image: {{ .Values.embedding.image }}
+          ports:
+            - containerPort: {{ .Values.embedding.port }}
+              name: http
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:{{ .Values.embedding.port }}"
+            - name: OLLAMA_MODELS
+              value: /root/.ollama
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+            - name: OLLAMA_FLASH_ATTENTION
+              value: "1"
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    until ollama list >/dev/null 2>&1; do sleep 1; done
+                    ollama show {{ .Values.embedding.model }} >/dev/null 2>&1 || ollama pull {{ .Values.embedding.model }}
+          resources:
+            {{- toYaml .Values.embedding.resources | nindent 12 }}
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: {{ .Values.embedding.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: ollama-data
+          hostPath:
+            path: {{ .Values.embedding.ollamaDataHostPath }}
+            type: DirectoryOrCreate
+{{- end }}

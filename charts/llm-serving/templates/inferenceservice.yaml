@@ -34,16 +34,20 @@ spec:
             value: "-1"
           - name: OLLAMA_FLASH_ATTENTION
             value: "1"
+          {{- if $model.numCtx }}
+          - name: OLLAMA_CONTEXT_LENGTH
+            value: {{ $model.numCtx | quote }}
+          {{- end }}
         resources:
           {{- toYaml $model.resources | nindent 10 }}
         volumeMounts:
-          {{- if $model.ggufFile }}
-          - name: models
-            mountPath: {{ $model.ggufPath }}
-            readOnly: true
-          {{- end }}
           - name: ollama-data
             mountPath: /root/.ollama
+          {{- if $model.toolsModelfile }}
+          - name: modelfiles
+            mountPath: /modelfiles
+            readOnly: true
+          {{- end }}
         lifecycle:
           postStart:
             exec:
@@ -51,25 +55,21 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  {{- if $model.ollamaPull }}
                   until ollama list >/dev/null 2>&1; do sleep 1; done
-                  ollama pull {{ $model.ollamaPull }}
-                  {{- else }}
-                  sleep 5
-                  cat <<'MODELFILE' > /tmp/Modelfile
-                  FROM {{ $model.ggufPath }}/{{ $model.ggufFile }}
-                  MODELFILE
-                  ollama create {{ $model.displayName }} -f /tmp/Modelfile
+                  ollama show {{ $model.ollamaPull }} >/dev/null 2>&1 || ollama pull {{ $model.ollamaPull }}
+                  {{- if and $model.toolsAlias $model.toolsModelfile }}
+                  ollama show {{ $model.toolsAlias }} >/dev/null 2>&1 || ollama create {{ $model.toolsAlias }} -f /modelfiles/{{ $model.toolsModelfile }}
                   {{- end }}
     volumes:
-      {{- if $model.ggufFile }}
-      - name: models
-        hostPath:
-          path: {{ $.Values.modelsHostPath }}/{{ $name }}
-          type: Directory
-      {{- end }}
       - name: ollama-data
-        emptyDir: {}
+        hostPath:
+          path: {{ $.Values.ollamaDataHostPath }}/{{ $name }}
+          type: DirectoryOrCreate
+      {{- if $model.toolsModelfile }}
+      - name: modelfiles
+        configMap:
+          name: ollama-modelfiles
+      {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

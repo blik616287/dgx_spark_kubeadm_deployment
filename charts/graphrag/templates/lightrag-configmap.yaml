@@ -1,0 +1,40 @@
+{{- if .Values.lightrag.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightrag-config
+  namespace: {{ .Values.namespace }}
+data:
+  WORKSPACE: "default"
+  HOST: "0.0.0.0"
+  PORT: {{ .Values.lightrag.port | quote }}
+  WORKING_DIR: "/app/data"
+  INPUT_DIR: "/app/data/inputs"
+  # LLM for entity extraction
+  LLM_BINDING: {{ .Values.lightrag.llm.binding }}
+  LLM_MODEL: {{ .Values.lightrag.llm.model }}
+  LLM_BINDING_HOST: {{ .Values.lightrag.llm.host }}
+  OLLAMA_NUM_CTX: "4096"
+  MAX_ASYNC: "2"
+  MAX_PARALLEL_INSERT: "1"
+  # Embedding
+  EMBEDDING_BINDING: {{ .Values.lightrag.embeddingConfig.binding }}
+  EMBEDDING_MODEL: {{ .Values.lightrag.embeddingConfig.model }}
+  EMBEDDING_DIM: {{ .Values.lightrag.embeddingConfig.dim | quote }}
+  EMBEDDING_BINDING_HOST: {{ .Values.lightrag.embeddingConfig.host }}
+  # Storage backends
+  LIGHTRAG_KV_STORAGE: {{ .Values.lightrag.storage.kv }}
+  LIGHTRAG_DOC_STATUS_STORAGE: {{ .Values.lightrag.storage.docStatus }}
+  LIGHTRAG_GRAPH_STORAGE: {{ .Values.lightrag.storage.graph }}
+  LIGHTRAG_VECTOR_STORAGE: {{ .Values.lightrag.storage.vector }}
+  # Neo4j
+  NEO4J_URI: "bolt://neo4j.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.neo4j.boltPort }}"
+  NEO4J_USERNAME: {{ .Values.neo4j.auth.username }}
+  NEO4J_PASSWORD: {{ .Values.neo4j.auth.password }}
+  # PostgreSQL
+  POSTGRES_HOST: "postgresql.{{ .Values.namespace }}.svc.cluster.local"
+  POSTGRES_PORT: {{ .Values.postgresql.port | quote }}
+  POSTGRES_USER: {{ .Values.postgresql.auth.username }}
+  POSTGRES_PASSWORD: {{ .Values.postgresql.auth.password }}
+  POSTGRES_DATABASE: {{ .Values.postgresql.auth.database }}
+{{- end }}

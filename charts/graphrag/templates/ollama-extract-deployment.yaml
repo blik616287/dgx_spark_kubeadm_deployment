@@ -1,0 +1,78 @@
+{{- if .Values.extraction.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-extract
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ollama-extract
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ollama-extract
+  template:
+    metadata:
+      labels:
+        app: ollama-extract
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      runtimeClassName: nvidia
+      containers:
+        - name: ollama
+          image: {{ .Values.extraction.image }}
+          ports:
+            - containerPort: {{ .Values.extraction.port }}
+              name: http
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:{{ .Values.extraction.port }}"
+            - name: OLLAMA_MODELS
+              value: /root/.ollama
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+            - name: OLLAMA_FLASH_ATTENTION
+              value: "1"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    until ollama list >/dev/null 2>&1; do sleep 1; done
+                    ollama show {{ .Values.extraction.model }} >/dev/null 2>&1 || ollama pull {{ .Values.extraction.model }}
+                    if ! ollama show {{ .Values.extraction.model }}-extract >/dev/null 2>&1; then
+                      cat > /tmp/extract.Modelfile <<MEOF
+                    FROM {{ .Values.extraction.model }}
+                    PARAMETER num_ctx 4096
+                    MEOF
+                      ollama create {{ .Values.extraction.model }}-extract -f /tmp/extract.Modelfile
+                    fi
+          resources:
+            {{- toYaml .Values.extraction.resources | nindent 12 }}
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: {{ .Values.extraction.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: ollama-data
+          hostPath:
+            path: {{ .Values.extraction.ollamaDataHostPath }}
+            type: DirectoryOrCreate
+{{- end }}

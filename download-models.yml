@@ -9,6 +9,10 @@
         tag: "qwen3-coder-next:q4_K_M"
       - name: deepseek-r1-distill-32b
         tag: "deepseek-r1-distill-qwen-32b:Q4_K_M"
+      - name: qwen3-embedding
+        tag: "qwen3-embedding:0.6b"
+      - name: llama3.1-8b
+        tag: "llama3.1:8b"
 
   environment:
     KUBECONFIG: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
@@ -21,14 +25,21 @@
         mode: '0755'
       loop: "{{ models }}"
 
-    - name: Pull models using temporary containers
-      command: >
-        kubectl run ollama-pull-{{ item.name }} --rm -i --restart=Never
-        --image=ollama/ollama:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","hostPath":{"path":"{{ ollama_data_dir }}/{{ item.name }}","type":"DirectoryOrCreate"}}],"containers":[{"name":"pull","image":"ollama/ollama:latest","command":["sh","-c","ollama serve & sleep 3 && ollama pull {{ item.tag }} && echo PULL_COMPLETE"],"volumeMounts":[{"name":"data","mountPath":"/root/.ollama"}]}]}}'
+    - name: Check which models are already downloaded
+      stat:
+        path: "{{ ollama_data_dir }}/{{ item.name }}/blobs"
       loop: "{{ models }}"
+      register: model_check
+
+    - name: Pull missing models using temporary containers
+      command: >
+        kubectl run ollama-pull-{{ item.item.name }} --rm -i --restart=Never
+        --image=ollama/ollama:latest
+        --overrides='{"spec":{"volumes":[{"name":"data","hostPath":{"path":"{{ ollama_data_dir }}/{{ item.item.name }}","type":"DirectoryOrCreate"}}],"containers":[{"name":"pull","image":"ollama/ollama:latest","command":["sh","-c","ollama serve & sleep 3 && ollama pull {{ item.item.tag }} && echo PULL_COMPLETE"],"volumeMounts":[{"name":"data","mountPath":"/root/.ollama"}]}]}}'
+      loop: "{{ model_check.results }}"
+      when: not item.stat.exists
       register: ollama_pull
-      changed_when: "'PULL_COMPLETE' in ollama_pull.stdout"
+      changed_when: ollama_pull.stdout is defined and 'PULL_COMPLETE' in ollama_pull.stdout
       timeout: 1800
 
     - name: Show downloaded model data
