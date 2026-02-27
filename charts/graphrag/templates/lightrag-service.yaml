@@ -1,0 +1,14 @@
+{{- if .Values.lightrag.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightrag
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: lightrag
+  ports:
+    - port: {{ .Values.lightrag.port }}
+      targetPort: {{ .Values.lightrag.port }}
+      name: http
+{{- end }}

@@ -1,0 +1,20 @@
+{{- $hasModelfiles := false }}
+{{- range $name, $model := .Values.models }}
+{{- if and $model.enabled $model.toolsModelfile }}
+{{- $hasModelfiles = true }}
+{{- end }}
+{{- end }}
+{{- if $hasModelfiles }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-modelfiles
+  namespace: {{ .Values.namespace }}
+data:
+  {{- range $name, $model := .Values.models }}
+  {{- if and $model.enabled $model.toolsModelfile }}
+  {{ $model.toolsModelfile }}: |
+{{ $.Files.Get (printf "files/%s" $model.toolsModelfile) | indent 4 }}
+  {{- end }}
+  {{- end }}
+{{- end }}

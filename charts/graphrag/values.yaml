@@ -1,0 +1,127 @@
+namespace: graphrag
+
+# -- Embedding model served by Ollama
+embedding:
+  enabled: true
+  image: ollama/ollama:latest
+  model: "qwen3-embedding:0.6b"
+  port: 11434
+  ollamaDataHostPath: /models/ollama-data/qwen3-embedding
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+      nvidia.com/gpu: "1"
+
+# -- Extraction LLM served by Ollama
+extraction:
+  enabled: true
+  image: ollama/ollama:latest
+  model: "llama3.1:8b"
+  port: 11434
+  ollamaDataHostPath: /models/ollama-data/llama3.1-8b
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 16Gi
+      nvidia.com/gpu: "1"
+
+# -- LightRAG application server
+lightrag:
+  enabled: true
+  image: localhost/graphrag-lightrag:v2
+  port: 9621
+  nodePort: 31436
+  # LLM for entity extraction -- points to ollama-extract
+  llm:
+    binding: ollama
+    model: "llama3.1:8b-extract"
+    host: "http://ollama-extract:11434"
+    numCtx: "32768"
+  # Embedding -- points to ollama-embed
+  embeddingConfig:
+    binding: ollama
+    model: "qwen3-embedding:0.6b"
+    dim: "1024"
+    host: "http://ollama-embed:11434"
+  # Storage backends
+  storage:
+    graph: Neo4JStorage
+    vector: PGVectorStorage
+    kv: PGKVStorage
+    docStatus: PGDocStatusStorage
+  persistence:
+    hostPath: /models/graphrag-data/lightrag
+  resources:
+    requests:
+      cpu: "1"
+      memory: 512Mi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+# -- Neo4j Community Edition
+neo4j:
+  enabled: true
+  image: neo4j:community
+  httpPort: 7474
+  boltPort: 7687
+  nodePort: 31474
+  auth:
+    username: neo4j
+    password: "graphrag-local-2024"
+  jvm:
+    heapInitial: "1g"
+    heapMax: "4g"
+    pagecache: "1g"
+  persistence:
+    hostPath: /models/graphrag-data/neo4j
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+
+# -- PostgreSQL with pgvector
+postgresql:
+  enabled: true
+  image: pgvector/pgvector:pg17
+  port: 5432
+  auth:
+    username: lightrag
+    password: "graphrag-local-2024"
+    database: lightrag
+  persistence:
+    hostPath: /models/graphrag-data/postgresql
+  resources:
+    requests:
+      cpu: "0.5"
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -- Code preprocessor (tree-sitter)
+codePreprocessor:
+  enabled: true
+  image: localhost/graphrag-code-preprocessor:v2
+  port: 8090
+  nodePort: 31490
+  resources:
+    requests:
+      cpu: "0.5"
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+nodeSelector:
+  kubernetes.io/arch: arm64

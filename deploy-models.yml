@@ -150,7 +150,7 @@
       register: deepseek_verify
       retries: 12
       delay: 15
-      until: deepseek_verify.rc == 0 and 'deepseek-r1-distill-32b' in deepseek_verify.stdout
+      until: deepseek_verify.rc == 0 and 'deepseek-r1-distill-32b-tools' in deepseek_verify.stdout
 
     - name: Show deployment status
       become: true

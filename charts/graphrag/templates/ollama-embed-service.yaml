@@ -1,0 +1,14 @@
+{{- if .Values.embedding.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-embed
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: ollama-embed
+  ports:
+    - port: {{ .Values.embedding.port }}
+      targetPort: {{ .Values.embedding.port }}
+      name: http
+{{- end }}

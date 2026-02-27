@@ -1,0 +1,14 @@
+{{- if .Values.extraction.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-extract
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: ollama-extract
+  ports:
+    - port: {{ .Values.extraction.port }}
+      targetPort: {{ .Values.extraction.port }}
+      name: http
+{{- end }}
