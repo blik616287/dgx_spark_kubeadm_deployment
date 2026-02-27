@@ -6,7 +6,9 @@ embedding:
   image: ollama/ollama:latest
   model: "qwen3-embedding:0.6b"
   port: 11434
-  ollamaDataHostPath: /models/ollama-data/qwen3-embedding
+  persistence:
+    storageClass: longhorn-models
+    size: 5Gi
   resources:
     requests:
       cpu: "1"
@@ -22,7 +24,9 @@ extraction:
   image: ollama/ollama:latest
   model: "llama3.1:8b"
   port: 11434
-  ollamaDataHostPath: /models/ollama-data/llama3.1-8b
+  persistence:
+    storageClass: longhorn-models
+    size: 10Gi
   resources:
     requests:
       cpu: "1"
@@ -30,6 +34,24 @@ extraction:
     limits:
       cpu: "4"
       memory: 16Gi
+      nvidia.com/gpu: "1"
+
+# -- Reranker model served by vLLM (GPU)
+reranker:
+  enabled: true
+  image: vllm/vllm-openai:nightly-aarch64
+  model: "BAAI/bge-reranker-v2-m3"
+  port: 8000
+  persistence:
+    storageClass: longhorn-models
+    size: 5Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
       nvidia.com/gpu: "1"
 
 # -- LightRAG application server
@@ -50,6 +72,12 @@ lightrag:
     model: "qwen3-embedding:0.6b"
     dim: "1024"
     host: "http://ollama-embed:11434"
+  # Reranker -- points to vllm-rerank
+  rerank:
+    enabled: true
+    binding: cohere
+    model: "BAAI/bge-reranker-v2-m3"
+    host: "http://vllm-rerank:8000/rerank"
   # Storage backends
   storage:
     graph: Neo4JStorage
@@ -57,7 +85,8 @@ lightrag:
     kv: PGKVStorage
     docStatus: PGDocStatusStorage
   persistence:
-    hostPath: /models/graphrag-data/lightrag
+    storageClass: longhorn
+    size: 10Gi
   resources:
     requests:
       cpu: "1"
@@ -81,7 +110,8 @@ neo4j:
     heapMax: "4g"
     pagecache: "1g"
   persistence:
-    hostPath: /models/graphrag-data/neo4j
+    storageClass: longhorn
+    size: 20Gi
   resources:
     requests:
       cpu: "1"
@@ -100,7 +130,8 @@ postgresql:
     password: "graphrag-local-2024"
     database: lightrag
   persistence:
-    hostPath: /models/graphrag-data/postgresql
+    storageClass: longhorn
+    size: 20Gi
   resources:
     requests:
       cpu: "0.5"

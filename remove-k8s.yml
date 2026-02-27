@@ -28,6 +28,26 @@
         KUBECONFIG: "{{ kubeconfig }}"
       failed_when: false
 
+    - name: Remove Longhorn finalizers to prevent stuck deletion
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        for crd in $(kubectl get crd -o name 2>/dev/null | grep longhorn); do
+          crd_name=$(echo "$crd" | cut -d/ -f2)
+          kubectl get "$crd_name" -A --no-headers 2>/dev/null | while read ns name rest; do
+            kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+          done
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      failed_when: false
+
+    - name: Remove Longhorn data
+      file:
+        path: /var/lib/longhorn
+        state: absent
+      failed_when: false
+
     - name: Reset kubeadm
       command: kubeadm reset -f
       failed_when: false

@@ -5,27 +5,28 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
-    ollama_data_dir: "/models/ollama-data"
     chart_dir: "{{ playbook_dir }}/charts/llm-serving"
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
 
   tasks:
-    # ── Verify models are downloaded ─────────────────────────────
-    - name: Check Ollama model data exists
-      find:
-        paths: "{{ ollama_data_dir }}"
-        file_type: directory
-      register: ollama_dirs
+    # ── Verify model PVCs exist ──────────────────────────────────
+    - name: Check model PVCs are bound
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n llm-serving get pvc ollama-qwen3-coder-next ollama-deepseek-r1-distill-32b --no-headers 2>/dev/null | grep -c Bound
+      register: pvc_check
+      failed_when: false
+      changed_when: false
 
-    - name: Warn if models not downloaded
+    - name: Warn if model PVCs not populated
       debug:
         msg: >
-          No model data found at {{ ollama_data_dir }}.
-          Models will be pulled on first pod start (slow).
-          Run download-models.yml first for instant deploys.
-      when: ollama_dirs.matched == 0
+          Model PVCs not found or not bound in llm-serving namespace.
+          Run download-models.yml first for pre-populated models.
+      when: pvc_check.stdout | default('0') | int < 2
 
     # ── Install cert-manager (KServe prerequisite) ────────────────
     - name: Add Jetstack Helm repo
@@ -116,7 +117,6 @@
         helm upgrade --install llm-serving {{ chart_dir }} \
           --namespace llm-serving \
           --create-namespace \
-          --set ollamaDataHostPath={{ ollama_data_dir }} \
           --wait --timeout 15m
       register: chart_install
 

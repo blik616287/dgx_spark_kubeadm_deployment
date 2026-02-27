@@ -36,7 +36,7 @@ spec:
             - name: OLLAMA_MODELS
               value: /root/.ollama
             - name: OLLAMA_KEEP_ALIVE
-              value: "-1"
+              value: "5m"
             - name: OLLAMA_FLASH_ATTENTION
               value: "1"
             - name: OLLAMA_NUM_PARALLEL
@@ -72,7 +72,6 @@ spec:
             periodSeconds: 10
       volumes:
         - name: ollama-data
-          hostPath:
-            path: {{ .Values.extraction.ollamaDataHostPath }}
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: ollama-extract-data
 {{- end }}

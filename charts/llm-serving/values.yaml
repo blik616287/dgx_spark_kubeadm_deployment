@@ -3,8 +3,6 @@ kserve: true
 
 namespace: llm-serving
 
-ollamaDataHostPath: /models/ollama-data
-
 # On DGX Spark (GB10 unified memory), GPU VRAM and system memory share
 # the same 128GB pool. Pod memory limits must cover model weights,
 # KV cache, and Ollama overhead since they all count against the cgroup.
@@ -26,11 +24,14 @@ models:
         memory: 120Gi
         nvidia.com/gpu: "1"
     numParallel: "1"
+    persistence:
+      storageClass: longhorn-models
+      size: 60Gi
 
   deepseek-r1-distill-32b:
     enabled: true
     image: ollama/ollama:latest
-    ollamaPull: "deepseek-r1-distill-qwen-32b:Q4_K_M"
+    ollamaPull: "deepseek-r1:32b"
     displayName: deepseek-r1-distill-32b
     port: 11434
     numCtx: "32768"
@@ -46,6 +47,9 @@ models:
         memory: 120Gi
         nvidia.com/gpu: "1"
     numParallel: "1"
+    persistence:
+      storageClass: longhorn-models
+      size: 30Gi
 
 nodeSelector:
   kubernetes.io/arch: arm64

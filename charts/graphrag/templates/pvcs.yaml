@@ -1,0 +1,101 @@
+{{- if .Values.neo4j.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: neo4j-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: neo4j
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.neo4j.persistence.storageClass | default "longhorn" }}
+  resources:
+    requests:
+      storage: {{ .Values.neo4j.persistence.size | default "20Gi" }}
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: postgresql
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.postgresql.persistence.storageClass | default "longhorn" }}
+  resources:
+    requests:
+      storage: {{ .Values.postgresql.persistence.size | default "20Gi" }}
+{{- end }}
+
+{{- if .Values.lightrag.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lightrag-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: lightrag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.lightrag.persistence.storageClass | default "longhorn" }}
+  resources:
+    requests:
+      storage: {{ .Values.lightrag.persistence.size | default "10Gi" }}
+{{- end }}
+
+{{- if .Values.embedding.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-embed-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ollama-embed
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.embedding.persistence.storageClass | default "longhorn-models" }}
+  resources:
+    requests:
+      storage: {{ .Values.embedding.persistence.size | default "5Gi" }}
+{{- end }}
+
+{{- if .Values.extraction.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-extract-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ollama-extract
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.extraction.persistence.storageClass | default "longhorn-models" }}
+  resources:
+    requests:
+      storage: {{ .Values.extraction.persistence.size | default "10Gi" }}
+{{- end }}
+
+{{- if .Values.reranker.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-rerank-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: vllm-rerank
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.reranker.persistence.storageClass | default "longhorn-models" }}
+  resources:
+    requests:
+      storage: {{ .Values.reranker.persistence.size | default "5Gi" }}
+{{- end }}

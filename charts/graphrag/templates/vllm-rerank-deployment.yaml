@@ -1,0 +1,60 @@
+{{- if .Values.reranker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-rerank
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: vllm-rerank
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-rerank
+  template:
+    metadata:
+      labels:
+        app: vllm-rerank
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      containers:
+        - name: vllm
+          image: {{ .Values.reranker.image }}
+          args:
+            - /data
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.reranker.port | quote }}
+            - --served-model-name
+            - {{ .Values.reranker.model }}
+            - --gpu-memory-utilization
+            - "0.05"
+            - --trust-remote-code
+          ports:
+            - containerPort: {{ .Values.reranker.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.reranker.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-data
+              mountPath: /data
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.reranker.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: model-data
+          persistentVolumeClaim:
+            claimName: vllm-rerank-data
+{{- end }}

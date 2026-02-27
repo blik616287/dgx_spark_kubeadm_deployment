@@ -55,7 +55,6 @@ spec:
             periodSeconds: 30
       volumes:
         - name: data
-          hostPath:
-            path: {{ .Values.postgresql.persistence.hostPath }}
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: postgresql-data
 {{- end }}

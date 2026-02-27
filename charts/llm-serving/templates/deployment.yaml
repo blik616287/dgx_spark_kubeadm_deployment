@@ -96,9 +96,8 @@ spec:
             periodSeconds: 30
       volumes:
         - name: models
-          hostPath:
-            path: {{ $.Values.modelsHostPath }}/{{ $name }}
-            type: Directory
+          persistentVolumeClaim:
+            claimName: ollama-{{ $name }}
         - name: ollama-data
           emptyDir: {}
 {{- end }}
