@@ -1,4 +1,4 @@
-FROM deepseek-r1-distill-32b:latest
+FROM deepseek-r1:32b
 
 TEMPLATE """{{- if .Messages }}
 {{- if or .System .Tools }}<|im_start|>system

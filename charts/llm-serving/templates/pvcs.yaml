@@ -1,0 +1,18 @@
+{{- range $name, $model := .Values.models }}
+{{- if $model.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-{{ $name }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: {{ $name }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ $model.persistence.storageClass | default "longhorn-models" }}
+  resources:
+    requests:
+      storage: {{ $model.persistence.size | default "60Gi" }}
+{{- end }}
+{{- end }}

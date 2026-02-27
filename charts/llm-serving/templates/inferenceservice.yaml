@@ -62,9 +62,8 @@ spec:
                   {{- end }}
     volumes:
       - name: ollama-data
-        hostPath:
-          path: {{ $.Values.ollamaDataHostPath }}/{{ $name }}
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: ollama-{{ $name }}
       {{- if $model.toolsModelfile }}
       - name: modelfiles
         configMap:

@@ -5,8 +5,6 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
-    graphrag_data_dir: "/models/graphrag-data"
-    ollama_data_dir: "/models/ollama-data"
     chart_dir: "{{ playbook_dir }}/charts/graphrag"
     apps_dir: "{{ playbook_dir }}/apps"
 
@@ -14,20 +12,6 @@
     KUBECONFIG: "{{ kubeconfig }}"
 
   tasks:
-    # ── Create data directories ────────────────────────────────────
-    - name: Create graphrag data directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop:
-        - "{{ graphrag_data_dir }}/neo4j"
-        - "{{ graphrag_data_dir }}/postgresql"
-        - "{{ graphrag_data_dir }}/lightrag"
-        - "{{ graphrag_data_dir }}/lightrag/inputs"
-        - "{{ ollama_data_dir }}/qwen3-embedding"
-        - "{{ ollama_data_dir }}/llama3.1-8b"
-
     # ── Build container images (nerdctl + buildkit → containerd k8s.io) ─
     - name: Check if code-preprocessor image exists in containerd
       shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-code-preprocessor | grep -q .
@@ -121,6 +105,16 @@
       register: extract_verify
       until: extract_verify.rc == 0 and 'llama3.1' in extract_verify.stdout
 
+    - name: Wait for vLLM reranker to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=vllm-rerank --timeout=300s
+      retries: 3
+      delay: 15
+      register: rerank_verify
+      until: rerank_verify.rc == 0
+
     - name: Wait for LightRAG pod to be ready
       become: true
       become_user: "{{ local_user }}"
@@ -167,6 +161,8 @@
         kubectl -n graphrag exec deploy/ollama-embed -- ollama list 2>/dev/null || echo "  (not ready)"
         echo "Extraction:"
         kubectl -n graphrag exec deploy/ollama-extract -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo "Reranker (vLLM):"
+        kubectl -n graphrag get pod -l app=vllm-rerank --no-headers 2>/dev/null || echo "  (not running)"
         echo ""
         echo "=== Endpoints ==="
         echo "LightRAG API:         http://localhost:31436"
@@ -179,6 +175,7 @@
         echo "PostgreSQL:           postgresql.graphrag.svc.cluster.local:5432"
         echo "Embedding (Ollama):   http://ollama-embed.graphrag.svc.cluster.local:11434"
         echo "Extraction (Ollama):  http://ollama-extract.graphrag.svc.cluster.local:11434"
+        echo "Reranker (vLLM):      http://vllm-rerank.graphrag.svc.cluster.local:8000"
         echo "Code Preprocessor:    http://code-preprocessor.graphrag.svc.cluster.local:8090"
       register: status
 

@@ -62,7 +62,6 @@ spec:
             periodSeconds: 30
       volumes:
         - name: data
-          hostPath:
-            path: {{ .Values.neo4j.persistence.hostPath }}
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: neo4j-data
 {{- end }}

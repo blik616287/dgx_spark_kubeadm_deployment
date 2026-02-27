@@ -34,15 +34,17 @@ ansible-playbook -i inventory.ini install-opencode.yml --become
 - Kubernetes 1.34 via kubeadm (single-node, control-plane taint removed)
 - Containerd with NVIDIA runtime as default
 - Flannel CNI (pod CIDR `10.244.0.0/16`)
-- NVIDIA GPU Operator with time-slicing (4 virtual GPUs from 1 physical GPU)
+- NVIDIA GPU Operator with time-slicing (5 virtual GPUs from 1 physical GPU)
 - Helm 3
+- Longhorn distributed storage (storage classes: `longhorn`, `longhorn-models`)
 - A 2-pod GPU sharing validation test
 
-**download-models.yml** pulls models to `/models/ollama-data/` using temporary Ollama containers:
+**download-models.yml** pulls models into Longhorn PVCs using temporary containers:
 - `qwen3-coder-next:q4_K_M` — primary code generation model
-- `deepseek-r1-distill-qwen-32b:Q4_K_M` — reasoning model (with tools-enabled variant)
+- `deepseek-r1:32b` — reasoning model (with tools-enabled variant)
 - `qwen3-embedding:0.6b` — embedding model for GraphRAG
 - `llama3.1:8b` — extraction model for GraphRAG
+- `BAAI/bge-reranker-v2-m3` — reranking model for GraphRAG (HuggingFace)
 
 **deploy-models.yml** deploys:
 - cert-manager (KServe prerequisite)
@@ -51,7 +53,7 @@ ansible-playbook -i inventory.ini install-opencode.yml --become
 
 **deploy-graphrag.yml** deploys:
 - Builds custom container images via `nerdctl` into containerd
-- `graphrag` Helm chart with LightRAG, Neo4j, PostgreSQL+pgvector, dedicated Ollama instances for embedding/extraction, and a tree-sitter code preprocessor
+- `graphrag` Helm chart with LightRAG, Neo4j, PostgreSQL+pgvector, dedicated Ollama instances for embedding/extraction, a vLLM reranker, and a tree-sitter code preprocessor
 
 **install-opencode.yml** sets up:
 - OpenCode IDE configured to use the local LLM endpoints
@@ -105,6 +107,7 @@ Deploys a full GraphRAG pipeline:
 
 - **ollama-embed** — Ollama serving qwen3-embedding for vector embeddings
 - **ollama-extract** — Ollama serving llama3.1:8b for entity extraction
+- **vllm-rerank** — vLLM serving BAAI/bge-reranker-v2-m3 for reranking
 - **LightRAG** — RAG server with workspace multitenancy (set `LIGHTRAG-WORKSPACE` header per request)
 - **Neo4j** — Graph storage for extracted entities and relationships
 - **PostgreSQL + pgvector** — Vector/KV storage for embeddings and document status
@@ -142,6 +145,7 @@ DGX Spark uses 128GB unified memory shared between GPU VRAM and system RAM. Pod 
 |---|---|---|
 | ollama-embed (qwen3-embedding) | 8Gi | 1 time-slice |
 | ollama-extract (llama3.1:8b) | 16Gi | 1 time-slice |
+| vllm-rerank (bge-reranker-v2-m3) | 8Gi | 1 time-slice |
 | Neo4j | 8Gi | — |
 | PostgreSQL | 2Gi | — |
 | LightRAG | 4Gi | — |

@@ -97,6 +97,8 @@
           - gnupg
           - socat
           - conntrack
+          - open-iscsi
+          - nfs-common
         state: present
         update_cache: true
 
@@ -326,7 +328,7 @@
                 failRequestsGreaterThanOne: false
                 resources:
                   - name: nvidia.com/gpu
-                    replicas: 4
+                    replicas: 5
         EOF
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
@@ -376,6 +378,107 @@
     - name: Show allocatable GPUs
       debug:
         msg: "Allocatable GPU slots: {{ gpu_count.stdout }} (time-sliced from 1 physical GPU)"
+
+    # ── Longhorn Distributed Storage ─────────────────────────────
+    - name: Enable and start iscsid
+      systemd:
+        name: iscsid
+        state: started
+        enabled: true
+
+    - name: Add Longhorn Helm repo
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm repo add longhorn https://charts.longhorn.io
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: longhorn_repo
+      changed_when: "'has been added' in longhorn_repo.stdout"
+      failed_when: false
+
+    - name: Update Helm repos
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm repo update
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Check if Longhorn is installed
+      become: true
+      become_user: "{{ local_user }}"
+      command: helm status longhorn -n longhorn-system
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: longhorn_status
+      failed_when: false
+      changed_when: false
+
+    - name: Install Longhorn
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        helm upgrade --install longhorn longhorn/longhorn \
+          --namespace longhorn-system \
+          --create-namespace \
+          --set defaultSettings.defaultReplicaCount=1 \
+          --set defaultSettings.defaultDataLocality=best-effort \
+          --set defaultSettings.storageMinimalAvailablePercentage=10 \
+          --set defaultSettings.storageReservedPercentageForDefaultDisk=10 \
+          --set persistence.defaultClass=true \
+          --set persistence.reclaimPolicy=Retain \
+          --set persistence.defaultClassReplicaCount=1 \
+          --set persistence.defaultDataLocality=best-effort \
+          --set persistence.defaultFsType=ext4 \
+          --wait --timeout 10m
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      when: longhorn_status.rc != 0
+
+    - name: Wait for Longhorn pods to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n longhorn-system wait --for=condition=Ready pods --all --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      retries: 6
+      delay: 30
+      register: longhorn_wait
+      until: longhorn_wait.rc == 0
+
+    - name: Create longhorn-models StorageClass
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: longhorn-models
+        provisioner: driver.longhorn.io
+        allowVolumeExpansion: true
+        reclaimPolicy: Retain
+        volumeBindingMode: Immediate
+        parameters:
+          numberOfReplicas: "1"
+          staleReplicaTimeout: "2880"
+          dataLocality: "strict-local"
+          fsType: "ext4"
+        EOF
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Verify Longhorn StorageClasses
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl get storageclass --no-headers
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: sc_check
+
+    - name: Show Longhorn status
+      debug:
+        msg: "{{ sc_check.stdout_lines }}"
 
     # ── GPU Sharing Test ───────────────────────────────────────────
     - name: Create gpu-test namespace
@@ -492,6 +595,14 @@
     - name: Show GPU sharing test result
       debug:
         var: gpu_share_test.stdout_lines
+
+    - name: Clean up GPU test pods
+      become: true
+      become_user: "{{ local_user }}"
+      shell: kubectl delete namespace gpu-test --timeout=60s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      failed_when: false
 
     # ── Final status ───────────────────────────────────────────────
     - name: Show final cluster status

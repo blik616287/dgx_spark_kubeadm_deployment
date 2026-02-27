@@ -22,6 +22,13 @@ data:
   EMBEDDING_MODEL: {{ .Values.lightrag.embeddingConfig.model }}
   EMBEDDING_DIM: {{ .Values.lightrag.embeddingConfig.dim | quote }}
   EMBEDDING_BINDING_HOST: {{ .Values.lightrag.embeddingConfig.host }}
+  # Reranker
+  {{- if .Values.lightrag.rerank.enabled }}
+  ENABLE_RERANK: "true"
+  RERANK_BINDING: {{ .Values.lightrag.rerank.binding }}
+  RERANK_MODEL: {{ .Values.lightrag.rerank.model }}
+  RERANK_BINDING_HOST: {{ .Values.lightrag.rerank.host }}
+  {{- end }}
   # Storage backends
   LIGHTRAG_KV_STORAGE: {{ .Values.lightrag.storage.kv }}
   LIGHTRAG_DOC_STATUS_STORAGE: {{ .Values.lightrag.storage.docStatus }}
