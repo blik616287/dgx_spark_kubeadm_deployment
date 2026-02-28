@@ -55,7 +55,7 @@ spec:
                     if ! ollama show {{ .Values.extraction.model }}-extract >/dev/null 2>&1; then
                       cat > /tmp/extract.Modelfile <<MEOF
                     FROM {{ .Values.extraction.model }}
-                    PARAMETER num_ctx 4096
+                    PARAMETER num_ctx {{ .Values.lightrag.llm.numCtx }}
                     MEOF
                       ollama create {{ .Values.extraction.model }}-extract -f /tmp/extract.Modelfile
                     fi

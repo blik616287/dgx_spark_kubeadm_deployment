@@ -1,0 +1,18 @@
+{{- if .Values.ingestWorker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingest-worker-config
+  namespace: {{ .Values.namespace }}
+data:
+  NATS_URL: "nats://nats.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.nats.clientPort }}"
+  PREPROCESSOR_URL: "http://code-preprocessor.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.codePreprocessor.port }}"
+  PG_HOST: "postgresql.{{ .Values.namespace }}.svc.cluster.local"
+  PG_PORT: {{ .Values.postgresql.port | quote }}
+  PG_USER: {{ .Values.postgresql.auth.username }}
+  PG_PASSWORD: {{ .Values.postgresql.auth.password }}
+  PG_DATABASE: {{ .Values.postgresql.auth.database }}
+  MAX_REDELIVERIES: {{ .Values.ingestWorker.maxRedeliveries | default "3" | quote }}
+  ACK_WAIT_SECONDS: {{ .Values.ingestWorker.ackWaitSeconds | default "600" | quote }}
+  BATCH_SIZE: {{ .Values.ingestWorker.batchSize | default "20" | quote }}
+{{- end }}

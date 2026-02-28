@@ -1,0 +1,17 @@
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: nats
+  ports:
+    - port: {{ .Values.nats.clientPort }}
+      targetPort: {{ .Values.nats.clientPort }}
+      name: client
+    - port: {{ .Values.nats.monitorPort }}
+      targetPort: {{ .Values.nats.monitorPort }}
+      name: monitor
+{{- end }}

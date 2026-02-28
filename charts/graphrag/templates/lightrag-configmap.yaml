@@ -14,9 +14,9 @@ data:
   LLM_BINDING: {{ .Values.lightrag.llm.binding }}
   LLM_MODEL: {{ .Values.lightrag.llm.model }}
   LLM_BINDING_HOST: {{ .Values.lightrag.llm.host }}
-  OLLAMA_NUM_CTX: "4096"
-  MAX_ASYNC: "2"
-  MAX_PARALLEL_INSERT: "1"
+  OLLAMA_NUM_CTX: {{ .Values.lightrag.llm.numCtx | quote }}
+  MAX_ASYNC: "4"
+  MAX_PARALLEL_INSERT: "2"
   # Embedding
   EMBEDDING_BINDING: {{ .Values.lightrag.embeddingConfig.binding }}
   EMBEDDING_MODEL: {{ .Values.lightrag.embeddingConfig.model }}

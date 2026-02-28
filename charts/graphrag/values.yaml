@@ -22,7 +22,7 @@ embedding:
 extraction:
   enabled: true
   image: ollama/ollama:latest
-  model: "llama3.1:8b"
+  model: "qwen3:8b"
   port: 11434
   persistence:
     storageClass: longhorn-models
@@ -63,9 +63,9 @@ lightrag:
   # LLM for entity extraction -- points to ollama-extract
   llm:
     binding: ollama
-    model: "llama3.1:8b-extract"
+    model: "qwen3:8b-extract"
     host: "http://ollama-extract:11434"
-    numCtx: "32768"
+    numCtx: "8192"
   # Embedding -- points to ollama-embed
   embeddingConfig:
     binding: ollama
@@ -153,6 +153,78 @@ codePreprocessor:
     limits:
       cpu: "2"
       memory: 1Gi
+
+# -- Redis (working memory for orchestrator)
+redis:
+  enabled: true
+  image: redis:7-alpine
+  port: 6379
+  maxmemory: "256mb"
+  persistence:
+    storageClass: longhorn
+    size: 1Gi
+  resources:
+    requests:
+      cpu: "0.1"
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- Memory Orchestrator (OpenAI-compatible proxy)
+orchestrator:
+  enabled: true
+  image: localhost/graphrag-orchestrator:latest
+  port: 8100
+  nodePort: 31800
+  sessionTtlSeconds: "7200"
+  backends:
+    qwen: "http://qwen3-coder-next-predictor.llm-serving.svc.cluster.local:80"
+    deepseek: "http://deepseek-r1-distill-32b-predictor.llm-serving.svc.cluster.local:80"
+  promoteAfterTurns: "10"
+  archivalAfterTurns: "20"
+  recallTopK: "3"
+  archivalTopK: "3"
+  resources:
+    requests:
+      cpu: "0.5"
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+# -- NATS with JetStream (message queue for ingestion)
+nats:
+  enabled: true
+  image: nats:2-alpine
+  clientPort: 4222
+  monitorPort: 8222
+  persistence:
+    storageClass: longhorn
+    size: 1Gi
+  resources:
+    requests:
+      cpu: "0.1"
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+# -- Ingest worker (NATS consumer for async document processing)
+ingestWorker:
+  enabled: true
+  image: localhost/graphrag-ingest-worker:latest
+  replicas: 1
+  maxRedeliveries: "3"
+  ackWaitSeconds: "600"
+  batchSize: "20"
+  resources:
+    requests:
+      cpu: "0.25"
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
 
 nodeSelector:
   kubernetes.io/arch: arm64

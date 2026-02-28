@@ -53,3 +53,22 @@ spec:
       name: http
 {{- end }}
 {{- end }}
+{{- if .Values.orchestrator.enabled }}
+{{- if .Values.orchestrator.nodePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-nodeport
+  namespace: {{ .Values.namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: orchestrator
+  ports:
+    - port: {{ .Values.orchestrator.port }}
+      targetPort: {{ .Values.orchestrator.port }}
+      nodePort: {{ .Values.orchestrator.nodePort }}
+      name: http
+{{- end }}
+{{- end }}

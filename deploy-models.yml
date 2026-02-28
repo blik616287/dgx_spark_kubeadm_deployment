@@ -16,7 +16,7 @@
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n llm-serving get pvc ollama-qwen3-coder-next ollama-deepseek-r1-distill-32b --no-headers 2>/dev/null | grep -c Bound
+        kubectl -n llm-serving get pvc ollama-{{ models.coding.name }} ollama-{{ models.reasoning.name }} --no-headers 2>/dev/null | grep -c Bound
       register: pvc_check
       failed_when: false
       changed_when: false
@@ -117,6 +117,9 @@
         helm upgrade --install llm-serving {{ chart_dir }} \
           --namespace llm-serving \
           --create-namespace \
+          --set models.{{ models.coding.name }}.ollamaPull={{ models.coding.tag }} \
+          --set models.{{ models.reasoning.name }}.ollamaPull={{ models.reasoning.tag }} \
+          --set models.{{ models.reasoning.name }}.toolsAlias={{ models.reasoning.tools_alias }} \
           --wait --timeout 15m
       register: chart_install
 
@@ -132,25 +135,25 @@
       until: pods_ready.rc == 0
 
     # ── Verify models are registered ─────────────────────────────
-    - name: Verify Qwen3-Coder-Next model is registered
+    - name: Verify Qwen model is registered
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n llm-serving exec deploy/qwen3-coder-next-predictor -- ollama list
+        kubectl -n llm-serving exec deploy/{{ models.coding.name }}-predictor -- ollama list
       register: qwen_verify
       retries: 12
       delay: 15
-      until: qwen_verify.rc == 0 and 'qwen3-coder-next' in qwen_verify.stdout
+      until: qwen_verify.rc == 0 and models.coding.name in qwen_verify.stdout
 
-    - name: Verify DeepSeek-R1 model is registered
+    - name: Verify DeepSeek model is registered
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        kubectl -n llm-serving exec deploy/deepseek-r1-distill-32b-predictor -- ollama list
+        kubectl -n llm-serving exec deploy/{{ models.reasoning.name }}-predictor -- ollama list
       register: deepseek_verify
       retries: 12
       delay: 15
-      until: deepseek_verify.rc == 0 and 'deepseek-r1-distill-32b-tools' in deepseek_verify.stdout
+      until: deepseek_verify.rc == 0 and models.reasoning.tools_alias in deepseek_verify.stdout
 
     - name: Show deployment status
       become: true
@@ -163,14 +166,14 @@
         kubectl get inferenceservice -n llm-serving
         echo ""
         echo "=== Loaded Models ==="
-        echo "Qwen3:"
-        kubectl -n llm-serving exec deploy/qwen3-coder-next-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
+        echo "Qwen:"
+        kubectl -n llm-serving exec deploy/{{ models.coding.name }}-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
         echo "DeepSeek:"
-        kubectl -n llm-serving exec deploy/deepseek-r1-distill-32b-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
+        kubectl -n llm-serving exec deploy/{{ models.reasoning.name }}-predictor -- ollama list 2>/dev/null || echo "  (not ready)"
         echo ""
         echo "=== Cluster Endpoints ==="
-        echo "Qwen3-Coder-Next:    http://qwen3-coder-next-predictor.llm-serving.svc.cluster.local:11434"
-        echo "DeepSeek-R1-Distill: http://deepseek-r1-distill-32b-predictor.llm-serving.svc.cluster.local:11434"
+        echo "Qwen:    {{ models.coding.backend_url }}"
+        echo "DeepSeek: {{ models.reasoning.backend_url }}"
       register: status
 
     - name: Display status

@@ -1,0 +1,62 @@
+---
+# ── Model Definitions ────────────────────────────────────────────────
+# Single source of truth for all model names across playbooks and Helm charts.
+# Keyed by ROLE — to swap a model, change its entry here.
+#
+# Fields:
+#   name     — short identifier used in k8s resource names
+#   tag      — full pull tag (ollama tag or HuggingFace repo)
+#   source   — "ollama" or "huggingface" (controls download method)
+#   namespace, pvc, size — download/storage config
+#
+# Role-specific optional fields:
+#   backend_url, nodeport  — LLM serving endpoints (coding, reasoning)
+#   tools_alias            — Ollama model alias for tool-use (reasoning)
+#   num_ctx                — context window override (extract)
+
+models:
+  coding:
+    name: "qwen3-coder-next"
+    tag: "qwen3-coder-next:q4_K_M"
+    source: ollama
+    namespace: llm-serving
+    pvc: "ollama-qwen3-coder-next"
+    size: 60Gi
+    backend_url: "http://qwen3-coder-next-predictor.llm-serving.svc.cluster.local:80"
+    nodeport: 31434
+
+  reasoning:
+    name: "deepseek-r1-distill-32b"
+    tag: "deepseek-r1:32b"
+    source: ollama
+    namespace: llm-serving
+    pvc: "ollama-deepseek-r1-distill-32b"
+    size: 30Gi
+    backend_url: "http://deepseek-r1-distill-32b-predictor.llm-serving.svc.cluster.local:80"
+    nodeport: 31435
+    tools_alias: "deepseek-r1-distill-32b-tools"
+
+  extract:
+    name: "qwen3-8b"
+    tag: "qwen3:8b"
+    source: ollama
+    namespace: graphrag
+    pvc: ollama-extract-data
+    size: 10Gi
+    num_ctx: "8192"
+
+  embed:
+    name: "qwen3-embedding"
+    tag: "qwen3-embedding:0.6b"
+    source: ollama
+    namespace: graphrag
+    pvc: ollama-embed-data
+    size: 5Gi
+
+  reranker:
+    name: "bge-reranker-v2-m3"
+    tag: "BAAI/bge-reranker-v2-m3"
+    source: huggingface
+    namespace: graphrag
+    pvc: vllm-rerank-data
+    size: 5Gi
