@@ -35,6 +35,30 @@
       when: lightrag_image_check.rc != 0
       timeout: 900
 
+    # ── Build orchestrator image ─────────────────────────────────
+    - name: Check if orchestrator image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-orchestrator | grep -q .
+      register: orchestrator_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build orchestrator image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-orchestrator:latest {{ apps_dir }}/orchestrator/
+      when: orchestrator_image_check.rc != 0
+      timeout: 600
+
+    # ── Build ingest-worker image ──────────────────────────────────
+    - name: Check if ingest-worker image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-ingest-worker | grep -q .
+      register: ingest_worker_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build ingest-worker image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-ingest-worker:latest {{ apps_dir }}/ingest-worker/
+      when: ingest_worker_image_check.rc != 0
+      timeout: 600
+
     # ── Deploy Helm chart ──────────────────────────────────────────
     - name: Clean up stuck Helm release if needed
       become: true
@@ -57,6 +81,15 @@
         helm upgrade --install graphrag {{ chart_dir }} \
           --namespace graphrag \
           --create-namespace \
+          --set extraction.model={{ models.extract.tag }} \
+          --set embedding.model={{ models.embed.tag }} \
+          --set lightrag.llm.model={{ models.extract.tag }}-extract \
+          --set lightrag.llm.numCtx={{ models.extract.num_ctx }} \
+          --set lightrag.embeddingConfig.model={{ models.embed.tag }} \
+          --set reranker.model={{ models.reranker.tag }} \
+          --set lightrag.rerank.model={{ models.reranker.tag }} \
+          --set orchestrator.backends.qwen={{ models.coding.backend_url }} \
+          --set orchestrator.backends.deepseek={{ models.reasoning.backend_url }} \
           --wait --timeout 15m
       register: chart_install
 
@@ -93,7 +126,7 @@
       retries: 24
       delay: 15
       register: embed_verify
-      until: embed_verify.rc == 0 and 'qwen3-embedding' in embed_verify.stdout
+      until: embed_verify.rc == 0 and models.embed.tag in embed_verify.stdout
 
     - name: Verify extraction model is loaded
       become: true
@@ -103,7 +136,7 @@
       retries: 24
       delay: 15
       register: extract_verify
-      until: extract_verify.rc == 0 and 'llama3.1' in extract_verify.stdout
+      until: extract_verify.rc == 0 and models.extract.tag in extract_verify.stdout
 
     - name: Wait for vLLM reranker to be ready
       become: true
@@ -134,6 +167,46 @@
       delay: 10
       register: preprocessor_ready
       until: preprocessor_ready.rc == 0
+
+    - name: Wait for Redis pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=redis --timeout=120s
+      retries: 3
+      delay: 10
+      register: redis_ready
+      until: redis_ready.rc == 0
+
+    - name: Wait for orchestrator pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=orchestrator --timeout=120s
+      retries: 3
+      delay: 10
+      register: orchestrator_ready
+      until: orchestrator_ready.rc == 0
+
+    - name: Wait for NATS pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=nats --timeout=120s
+      retries: 3
+      delay: 10
+      register: nats_ready
+      until: nats_ready.rc == 0
+
+    - name: Wait for ingest-worker pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingest-worker --timeout=120s
+      retries: 3
+      delay: 10
+      register: ingest_worker_ready
+      until: ingest_worker_ready.rc == 0
 
     # ── Enable pgvector extension ──────────────────────────────────
     - name: Enable pgvector extension in PostgreSQL
@@ -168,6 +241,7 @@
         echo "LightRAG API:         http://localhost:31436"
         echo "Neo4j Browser:        http://localhost:31474"
         echo "Code Preprocessor:    http://localhost:31490"
+        echo "Memory Orchestrator:  http://localhost:31800"
         echo ""
         echo "=== Cluster-internal ==="
         echo "LightRAG:             http://lightrag.graphrag.svc.cluster.local:9621"
@@ -177,6 +251,9 @@
         echo "Extraction (Ollama):  http://ollama-extract.graphrag.svc.cluster.local:11434"
         echo "Reranker (vLLM):      http://vllm-rerank.graphrag.svc.cluster.local:8000"
         echo "Code Preprocessor:    http://code-preprocessor.graphrag.svc.cluster.local:8090"
+        echo "Orchestrator:         http://orchestrator.graphrag.svc.cluster.local:8100"
+        echo "NATS:                 nats://nats.graphrag.svc.cluster.local:4222"
+        echo "Ingest Worker:        (NATS consumer on INGEST stream)"
       register: status
 
     - name: Display status

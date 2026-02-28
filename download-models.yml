@@ -5,38 +5,6 @@
   vars:
     local_user: "{{ ansible_env.SUDO_USER | default('b') }}"
     kubeconfig: "/home/{{ local_user }}/.kube/config"
-    ollama_models:
-      - name: qwen3-coder-next
-        tag: "qwen3-coder-next:q4_K_M"
-        namespace: llm-serving
-        helm_release: llm-serving
-        pvc: ollama-qwen3-coder-next
-        size: 60Gi
-      - name: deepseek-r1-distill-32b
-        tag: "deepseek-r1:32b"
-        namespace: llm-serving
-        helm_release: llm-serving
-        pvc: ollama-deepseek-r1-distill-32b
-        size: 30Gi
-      - name: qwen3-embedding
-        tag: "qwen3-embedding:0.6b"
-        namespace: graphrag
-        helm_release: graphrag
-        pvc: ollama-embed-data
-        size: 5Gi
-      - name: llama3.1-8b
-        tag: "llama3.1:8b"
-        namespace: graphrag
-        helm_release: graphrag
-        pvc: ollama-extract-data
-        size: 10Gi
-    huggingface_models:
-      - name: bge-reranker-v2-m3
-        repo: "BAAI/bge-reranker-v2-m3"
-        namespace: graphrag
-        helm_release: graphrag
-        pvc: vllm-rerank-data
-        size: 5Gi
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
@@ -47,11 +15,9 @@
       become: true
       become_user: "{{ local_user }}"
       shell: kubectl create namespace {{ item }} --dry-run=client -o yaml | kubectl apply -f -
-      loop:
-        - llm-serving
-        - graphrag
+      loop: "{{ models.values() | map(attribute='namespace') | unique | list }}"
 
-    - name: Create Ollama model PVCs
+    - name: Create model PVCs
       become: true
       become_user: "{{ local_user }}"
       shell: |
@@ -61,11 +27,6 @@
         metadata:
           name: {{ item.pvc }}
           namespace: {{ item.namespace }}
-          labels:
-            app.kubernetes.io/managed-by: Helm
-          annotations:
-            meta.helm.sh/release-name: {{ item.helm_release }}
-            meta.helm.sh/release-namespace: {{ item.namespace }}
         spec:
           accessModes: ["ReadWriteOnce"]
           storageClassName: longhorn-models
@@ -73,37 +34,13 @@
             requests:
               storage: {{ item.size }}
         EOF
-      loop: "{{ ollama_models }}"
-
-    - name: Create HuggingFace model PVCs
-      become: true
-      become_user: "{{ local_user }}"
-      shell: |
-        cat <<'EOF' | kubectl apply -f -
-        apiVersion: v1
-        kind: PersistentVolumeClaim
-        metadata:
-          name: {{ item.pvc }}
-          namespace: {{ item.namespace }}
-          labels:
-            app.kubernetes.io/managed-by: Helm
-          annotations:
-            meta.helm.sh/release-name: {{ item.helm_release }}
-            meta.helm.sh/release-namespace: {{ item.namespace }}
-        spec:
-          accessModes: ["ReadWriteOnce"]
-          storageClassName: longhorn-models
-          resources:
-            requests:
-              storage: {{ item.size }}
-        EOF
-      loop: "{{ huggingface_models }}"
+      loop: "{{ models.values() | list }}"
 
     - name: Wait for PVCs to be bound
       become: true
       become_user: "{{ local_user }}"
       shell: kubectl -n {{ item.namespace }} wait --for=jsonpath='{.status.phase}'=Bound pvc/{{ item.pvc }} --timeout=120s
-      loop: "{{ ollama_models + huggingface_models }}"
+      loop: "{{ models.values() | list }}"
 
     # ── Check existing Ollama models ─────────────────────────────
     - name: Check Ollama model integrity in PVCs
@@ -114,7 +51,7 @@
         -n {{ item.namespace }}
         --image=busybox:latest
         --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if find /data/manifests -type f 2>/dev/null | grep -q .; then partials=$(find /data/blobs -name *-partial* 2>/dev/null | wc -l); if [ $partials -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ ollama_models }}"
+      loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
       register: ollama_check
       changed_when: false
       timeout: 120
@@ -143,7 +80,7 @@
         -n {{ item.namespace }}
         --image=busybox:latest
         --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","manifest=$(find /data/manifests -type f 2>/dev/null | head -1); if [ -z \"$manifest\" ]; then echo SKIP; exit 0; fi; failed=0; for digest in $(grep -oE sha256:[a-f0-9]+ \"$manifest\"); do blob=/data/blobs/$(echo $digest | tr : -); expected=$(echo $digest | cut -d: -f2); if [ ! -f \"$blob\" ]; then echo FAIL:missing:$digest; failed=1; continue; fi; actual=$(sha256sum \"$blob\" | cut -d\" \" -f1); size=$(du -h \"$blob\" | cut -f1); if [ \"$actual\" = \"$expected\" ]; then echo PASS:$size:$digest; else echo FAIL:$size:$digest; failed=1; fi; done; exit $failed"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ ollama_models }}"
+      loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
       register: ollama_verify
       timeout: 600
 
@@ -161,7 +98,7 @@
         -n {{ item.namespace }}
         --image=busybox:latest
         --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if [ -f /data/config.json ]; then incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ huggingface_models }}"
+      loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
       register: hf_check
       changed_when: false
       timeout: 120
@@ -174,7 +111,7 @@
         kubectl run hf-pull-{{ item.item.name }} --rm -i --restart=Never
         -n {{ item.item.namespace }}
         --image=python:3.12-slim
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.repo }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.tag }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
       loop: "{{ hf_check.results }}"
       when: item.stdout is not defined or item.stdout.strip() != "ok"
       register: hf_pull
@@ -190,7 +127,7 @@
         -n {{ item.namespace }}
         --image=busybox:latest
         --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","if [ ! -f /data/config.json ]; then echo SKIP; exit 0; fi; incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo FAIL:incomplete; exit 1; fi; for sf in /data/*.safetensors; do [ -f \"$sf\" ] || continue; size=$(du -h \"$sf\" | cut -f1); hash=$(sha256sum \"$sf\" | cut -d\" \" -f1); echo PASS:$size:$(basename $sf):sha256:$hash; done; echo ok"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ huggingface_models }}"
+      loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
       register: hf_verify
       timeout: 600
 
@@ -205,9 +142,11 @@
       become_user: "{{ local_user }}"
       shell: |
         echo "=== Model PVCs ==="
-        kubectl get pvc -n llm-serving --no-headers 2>/dev/null || echo "  (none)"
+        {% for ns in models.values() | map(attribute='namespace') | unique %}
+        echo "--- {{ ns }} ---"
+        kubectl get pvc -n {{ ns }} --no-headers 2>/dev/null || echo "  (none)"
         echo ""
-        kubectl get pvc -n graphrag --no-headers 2>/dev/null || echo "  (none)"
+        {% endfor %}
       register: pvc_status
 
     - name: Display PVC status

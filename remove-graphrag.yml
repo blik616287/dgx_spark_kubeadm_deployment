@@ -37,5 +37,5 @@
         msg:
           - "GraphRAG deployment removed."
           - "Data preserved at /models/graphrag-data/ (neo4j, postgresql, lightrag)"
-          - "Model data preserved at /models/ollama-data/ (qwen3-embedding, llama3.1-8b)"
+          - "Model data preserved at /models/ollama-data/ ({{ models.embed.name }}, {{ models.extract.name }})"
           - "To remove all data: sudo rm -rf /models/graphrag-data/"

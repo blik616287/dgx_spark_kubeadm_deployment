@@ -1,0 +1,38 @@
+{{- if .Values.orchestrator.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: {{ .Values.namespace }}
+data:
+  # NATS
+  NATS_URL: "nats://nats.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.nats.clientPort }}"
+  # Redis
+  REDIS_URL: "redis://redis.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.redis.port }}/0"
+  SESSION_TTL_SECONDS: {{ .Values.orchestrator.sessionTtlSeconds | default "7200" | quote }}
+  # PostgreSQL
+  PG_HOST: "postgresql.{{ .Values.namespace }}.svc.cluster.local"
+  PG_PORT: {{ .Values.postgresql.port | quote }}
+  PG_USER: {{ .Values.postgresql.auth.username }}
+  PG_PASSWORD: {{ .Values.postgresql.auth.password }}
+  PG_DATABASE: {{ .Values.postgresql.auth.database }}
+  # LightRAG
+  LIGHTRAG_URL: "http://lightrag.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.lightrag.port }}"
+  # Code Preprocessor
+  PREPROCESSOR_URL: "http://code-preprocessor.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.codePreprocessor.port }}"
+  # Embedding
+  EMBED_URL: "http://ollama-embed.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.embedding.port }}"
+  EMBED_MODEL: {{ .Values.embedding.model | quote }}
+  EMBED_DIM: {{ .Values.lightrag.embeddingConfig.dim | quote }}
+  # Backend LLMs
+  QWEN_BACKEND_URL: {{ .Values.orchestrator.backends.qwen | quote }}
+  DEEPSEEK_BACKEND_URL: {{ .Values.orchestrator.backends.deepseek | quote }}
+  # Summarizer
+  SUMMARIZER_URL: "http://ollama-extract.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.extraction.port }}"
+  SUMMARIZER_MODEL: {{ .Values.extraction.model | quote }}
+  # Memory thresholds
+  PROMOTE_AFTER_TURNS: {{ .Values.orchestrator.promoteAfterTurns | default "10" | quote }}
+  ARCHIVAL_AFTER_TURNS: {{ .Values.orchestrator.archivalAfterTurns | default "20" | quote }}
+  RECALL_TOP_K: {{ .Values.orchestrator.recallTopK | default "3" | quote }}
+  ARCHIVAL_TOP_K: {{ .Values.orchestrator.archivalTopK | default "3" | quote }}
+{{- end }}

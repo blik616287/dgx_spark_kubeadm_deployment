@@ -99,3 +99,37 @@ spec:
     requests:
       storage: {{ .Values.reranker.persistence.size | default "5Gi" }}
 {{- end }}
+
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: redis
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.redis.persistence.storageClass | default "longhorn" }}
+  resources:
+    requests:
+      storage: {{ .Values.redis.persistence.size | default "1Gi" }}
+{{- end }}
+
+{{- if .Values.nats.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: nats
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.nats.persistence.storageClass | default "longhorn" }}
+  resources:
+    requests:
+      storage: {{ .Values.nats.persistence.size | default "1Gi" }}
+{{- end }}

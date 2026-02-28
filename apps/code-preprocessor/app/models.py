@@ -26,6 +26,12 @@ class ParseResult(BaseModel):
     relationships: list[Relationship]
 
 
+class CodeBlock(BaseModel):
+    language: str | None
+    code: str
+    index: int
+
+
 class IngestRequest(BaseModel):
     workspace: str = "default"
     lightrag_url: str = "http://lightrag:9621"

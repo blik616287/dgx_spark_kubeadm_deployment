@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 import httpx
@@ -7,6 +8,9 @@ from fastapi import FastAPI, UploadFile, File, Header, HTTPException
 from .models import ParseResult, IngestResponse
 from .languages import detect_language
 from .parser import parse_file
+from .extractor import pdf_to_text, pdf_to_chunks, extract_code_blocks
+
+logger = logging.getLogger("code-preprocessor")
 
 app = FastAPI(title="Code Preprocessor", version="0.1.0")
 
@@ -91,17 +95,69 @@ async def ingest(
                     errors.append(f"{file_path}: {e}")
 
             elif ext in DOC_EXTENSIONS:
-                # Forward directly to LightRAG upload
+                # Extract text and send to LightRAG
                 try:
-                    resp = await client.post(
-                        f"{LIGHTRAG_URL}/documents/upload",
-                        files={"file": (file_path, content)},
-                        headers={"LIGHTRAG-WORKSPACE": x_workspace},
-                    )
-                    resp.raise_for_status()
-                    documents_sent += 1
+                    if ext == ".pdf":
+                        pages_per_chunk = 50
+                        chunks = pdf_to_chunks(content, pages_per_chunk)
+                        logger.info(
+                            f"PDF {file_path}: {len(chunks)} chunks to ingest"
+                        )
+                        for ci, chunk in enumerate(chunks):
+                            page_start = ci * pages_per_chunk + 1
+                            page_end = (ci + 1) * pages_per_chunk
+                            label = f"{file_path} (pages {page_start}-{page_end})"
+                            resp = await client.post(
+                                f"{LIGHTRAG_URL}/documents/text",
+                                json={"text": f"# {label}\n\n{chunk}"},
+                                headers={"LIGHTRAG-WORKSPACE": x_workspace},
+                            )
+                            resp.raise_for_status()
+                            documents_sent += 1
+                    else:
+                        text = content.decode("utf-8", errors="replace")
+                        resp = await client.post(
+                            f"{LIGHTRAG_URL}/documents/text",
+                            json={"text": text},
+                            headers={"LIGHTRAG-WORKSPACE": x_workspace},
+                        )
+                        resp.raise_for_status()
+                        documents_sent += 1
                 except Exception as e:
                     errors.append(f"{file_path}: {e}")
+
+                # Extract code blocks and parse with tree-sitter
+                try:
+                    if ext == ".pdf":
+                        md_text = pdf_to_text(content)
+                    else:
+                        md_text = content.decode("utf-8", errors="replace")
+
+                    code_blocks = extract_code_blocks(md_text)
+                    for block in code_blocks:
+                        if not block.language:
+                            continue
+                        lang_ext = {
+                            "python": ".py", "javascript": ".js",
+                            "typescript": ".ts", "go": ".go",
+                            "rust": ".rs", "java": ".java",
+                            "c": ".c", "cpp": ".cpp",
+                        }.get(block.language, "")
+                        synthetic_name = f"{file_path}:block_{block.index}{lang_ext}"
+                        result = parse_file(synthetic_name, block.code, block.language)
+                        resp = await client.post(
+                            f"{LIGHTRAG_URL}/documents/text",
+                            json={"text": result.document},
+                            headers={"LIGHTRAG-WORKSPACE": x_workspace},
+                        )
+                        resp.raise_for_status()
+                        documents_sent += 1
+                        logger.info(
+                            f"Extracted code block {block.index} ({block.language}) "
+                            f"from {file_path}: {len(result.entities)} entities"
+                        )
+                except Exception as e:
+                    errors.append(f"{file_path} (code extraction): {e}")
             else:
                 # Try as text
                 try:
