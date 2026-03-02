@@ -59,6 +59,18 @@
       when: ingest_worker_image_check.rc != 0
       timeout: 600
 
+    # ── Build ingestion-ui image ──────────────────────────────────
+    - name: Check if ingestion-ui image exists in containerd
+      shell: nerdctl --namespace k8s.io images -q --filter reference=localhost/graphrag-ingestion-ui | grep -q .
+      register: ingestion_ui_image_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build ingestion-ui image
+      shell: nerdctl --namespace k8s.io build -t localhost/graphrag-ingestion-ui:latest {{ apps_dir }}/ingestion-ui/
+      when: ingestion_ui_image_check.rc != 0
+      timeout: 600
+
     # ── Deploy Helm chart ──────────────────────────────────────────
     - name: Clean up stuck Helm release if needed
       become: true
@@ -208,6 +220,16 @@
       register: ingest_worker_ready
       until: ingest_worker_ready.rc == 0
 
+    - name: Wait for ingestion-ui pod to be ready
+      become: true
+      become_user: "{{ local_user }}"
+      shell: |
+        kubectl -n graphrag wait --for=condition=Ready pod -l app=ingestion-ui --timeout=120s
+      retries: 3
+      delay: 10
+      register: ingestion_ui_ready
+      until: ingestion_ui_ready.rc == 0
+
     # ── Enable pgvector extension ──────────────────────────────────
     - name: Enable pgvector extension in PostgreSQL
       become: true
@@ -242,6 +264,7 @@
         echo "Neo4j Browser:        http://localhost:31474"
         echo "Code Preprocessor:    http://localhost:31490"
         echo "Memory Orchestrator:  http://localhost:31800"
+        echo "Ingestion UI:         http://localhost:31300"
         echo ""
         echo "=== Cluster-internal ==="
         echo "LightRAG:             http://lightrag.graphrag.svc.cluster.local:9621"
@@ -254,6 +277,7 @@
         echo "Orchestrator:         http://orchestrator.graphrag.svc.cluster.local:8100"
         echo "NATS:                 nats://nats.graphrag.svc.cluster.local:4222"
         echo "Ingest Worker:        (NATS consumer on INGEST stream)"
+        echo "Ingestion UI:         http://ingestion-ui.graphrag.svc.cluster.local:8080"
       register: status
 
     - name: Display status

@@ -1,0 +1,52 @@
+{{- if .Values.ingestionUi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: ingestion-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-ui
+  template:
+    metadata:
+      labels:
+        app: ingestion-ui
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-orchestrator
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z orchestrator.{{ .Values.namespace }}.svc.cluster.local {{ .Values.orchestrator.port }}; do echo "waiting for orchestrator..."; sleep 3; done']
+        - name: wait-lightrag
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lightrag.{{ .Values.namespace }}.svc.cluster.local {{ .Values.lightrag.port }}; do echo "waiting for lightrag..."; sleep 3; done']
+      containers:
+        - name: ingestion-ui
+          image: {{ .Values.ingestionUi.image }}
+          imagePullPolicy: Never
+          ports:
+            - containerPort: {{ .Values.ingestionUi.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.ingestionUi.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.ingestionUi.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.ingestionUi.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+{{- end }}

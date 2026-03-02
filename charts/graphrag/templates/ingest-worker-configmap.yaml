@@ -12,6 +12,9 @@ data:
   PG_USER: {{ .Values.postgresql.auth.username }}
   PG_PASSWORD: {{ .Values.postgresql.auth.password }}
   PG_DATABASE: {{ .Values.postgresql.auth.database }}
+  LIGHTRAG_URL: "http://lightrag.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.lightrag.port }}"
+  INDEXING_POLL_TIMEOUT: {{ .Values.ingestWorker.indexingPollTimeout | default "300" | quote }}
+  INDEXING_POLL_INTERVAL: {{ .Values.ingestWorker.indexingPollInterval | default "5" | quote }}
   MAX_REDELIVERIES: {{ .Values.ingestWorker.maxRedeliveries | default "3" | quote }}
   ACK_WAIT_SECONDS: {{ .Values.ingestWorker.ackWaitSeconds | default "600" | quote }}
   BATCH_SIZE: {{ .Values.ingestWorker.batchSize | default "20" | quote }}

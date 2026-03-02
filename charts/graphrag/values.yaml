@@ -226,5 +226,19 @@ ingestWorker:
       cpu: "1"
       memory: 512Mi
 
+# -- Ingestion Management UI (React SPA + nginx)
+ingestionUi:
+  enabled: true
+  image: localhost/graphrag-ingestion-ui:latest
+  port: 8080
+  nodePort: 31300
+  resources:
+    requests:
+      cpu: "0.1"
+      memory: 64Mi
+    limits:
+      cpu: "0.5"
+      memory: 128Mi
+
 nodeSelector:
   kubernetes.io/arch: arm64

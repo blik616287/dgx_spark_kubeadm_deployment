@@ -14,7 +14,7 @@ from .services import (
     summarizer,
     nats_client,
 )
-from .routes import chat, models_list, documents, sessions, jobs
+from .routes import chat, models_list, documents, sessions, jobs, workspaces
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestrator")
@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
     # Initialize route modules
     chat.init_chat(settings, _http_client)
     documents.init_documents(settings)
+    workspaces.init_workspaces(settings)
 
     logger.info("Memory Orchestrator ready")
     yield
@@ -70,6 +71,7 @@ app.include_router(models_list.router)
 app.include_router(documents.router)
 app.include_router(sessions.router)
 app.include_router(jobs.router)
+app.include_router(workspaces.router)
 
 
 @app.get("/health")

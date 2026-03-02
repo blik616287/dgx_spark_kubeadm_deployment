@@ -7,8 +7,8 @@ import nats
 from nats.js.api import StreamConfig
 
 from .config import Settings
-from .db import init_pool, close_pool, get_job, mark_job_started, mark_job_completed, mark_job_failed, reset_job_queued
-from .processor import process_document, process_codebase
+from .db import init_pool, close_pool, get_job, mark_job_started, mark_job_indexing, mark_job_completed, mark_job_failed, reset_job_queued
+from .processor import process_document, process_codebase, poll_lightrag_done
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ingest-worker")
@@ -74,6 +74,17 @@ async def handle_message(msg):
             result = await process_document(
                 job_id, job["doc_id"], settings.preprocessor_url
             )
+
+        await mark_job_indexing(job_id, result)
+        logger.info(f"Job {job_id} indexing: {result}")
+
+        timed_out = await poll_lightrag_done(
+            job["workspace"], settings.lightrag_url,
+            settings.indexing_poll_timeout, settings.indexing_poll_interval,
+        )
+        if timed_out:
+            result["indexing_timeout"] = True
+            logger.warning(f"Job {job_id} indexing poll timed out, marking completed anyway")
 
         await mark_job_completed(job_id, result)
         await msg.ack()

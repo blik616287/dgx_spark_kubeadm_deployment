@@ -27,6 +27,11 @@
         metadata:
           name: {{ item.pvc }}
           namespace: {{ item.namespace }}
+          labels:
+            app.kubernetes.io/managed-by: Helm
+          annotations:
+            meta.helm.sh/release-name: {{ item.namespace }}
+            meta.helm.sh/release-namespace: {{ item.namespace }}
         spec:
           accessModes: ["ReadWriteOnce"]
           storageClassName: longhorn-models
@@ -42,99 +47,121 @@
       shell: kubectl -n {{ item.namespace }} wait --for=jsonpath='{.status.phase}'=Bound pvc/{{ item.pvc }} --timeout=120s
       loop: "{{ models.values() | list }}"
 
-    # ── Check existing Ollama models ─────────────────────────────
-    - name: Check Ollama model integrity in PVCs
+    # ── Clean up stale pods from previous runs ────────────────────
+    - name: Delete stale check/verify/pull pods
       become: true
       become_user: "{{ local_user }}"
-      command: >
-        kubectl run check-{{ item.name }} --rm -i --restart=Never
-        -n {{ item.namespace }}
-        --image=busybox:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if find /data/manifests -type f 2>/dev/null | grep -q .; then partials=$(find /data/blobs -name *-partial* 2>/dev/null | wc -l); if [ $partials -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
-      register: ollama_check
+      shell: |
+        for prefix in check check-hf verify verify-hf ollama-pull hf-pull; do
+          kubectl get pods -n {{ item }} --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
+            | grep "^${prefix}-" \
+            | xargs -r kubectl delete pod -n {{ item }} --force --grace-period=0 2>/dev/null || true
+        done
+      loop: "{{ models.values() | map(attribute='namespace') | unique | list }}"
       changed_when: false
-      timeout: 120
+      failed_when: false
 
-    # ── Pull missing Ollama models ───────────────────────────────
-    - name: Pull missing or incomplete Ollama models
-      become: true
-      become_user: "{{ local_user }}"
-      command: >
-        kubectl run ollama-pull-{{ item.item.name }} --rm -i --restart=Never
-        -n {{ item.item.namespace }}
-        --image=ollama/ollama:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"ollama/ollama:latest","env":[{"name":"OLLAMA_MODELS","value":"/root/.ollama"}],"command":["sh","-c","ollama serve & sleep 3 && ollama pull {{ item.item.tag }} && echo PULL_COMPLETE"],"volumeMounts":[{"name":"data","mountPath":"/root/.ollama"}]}]}}'
-      loop: "{{ ollama_check.results }}"
-      when: item.stdout is not defined or item.stdout.strip() != "ok"
-      register: ollama_pull
-      changed_when: ollama_pull.stdout is defined and 'PULL_COMPLETE' in ollama_pull.stdout
-      timeout: 3600
+    # ── Ollama models (check → pull → verify) ──────────────────
+    - name: Download and verify Ollama models
+      block:
+        - name: Check Ollama model integrity in PVCs
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run check-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if find /data/manifests -type f 2>/dev/null | grep -q .; then partials=$(find /data/blobs -name *-partial* 2>/dev/null | wc -l); if [ $partials -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
+          register: ollama_check
+          changed_when: false
+          timeout: 120
 
-    # ── Verify Ollama SHA256 checksums ───────────────────────────
-    - name: Verify Ollama model SHA256 checksums
-      become: true
-      become_user: "{{ local_user }}"
-      command: >
-        kubectl run verify-{{ item.name }} --rm -i --restart=Never
-        -n {{ item.namespace }}
-        --image=busybox:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","manifest=$(find /data/manifests -type f 2>/dev/null | head -1); if [ -z \"$manifest\" ]; then echo SKIP; exit 0; fi; failed=0; for digest in $(grep -oE sha256:[a-f0-9]+ \"$manifest\"); do blob=/data/blobs/$(echo $digest | tr : -); expected=$(echo $digest | cut -d: -f2); if [ ! -f \"$blob\" ]; then echo FAIL:missing:$digest; failed=1; continue; fi; actual=$(sha256sum \"$blob\" | cut -d\" \" -f1); size=$(du -h \"$blob\" | cut -f1); if [ \"$actual\" = \"$expected\" ]; then echo PASS:$size:$digest; else echo FAIL:$size:$digest; failed=1; fi; done; exit $failed"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
-      register: ollama_verify
-      timeout: 600
+        - name: Pull missing or incomplete Ollama models
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run ollama-pull-{{ item.item.name }} --rm -i --restart=Never
+            -n {{ item.item.namespace }}
+            --image=ollama/ollama:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"ollama/ollama:latest","env":[{"name":"OLLAMA_MODELS","value":"/root/.ollama"}],"command":["sh","-c","ollama serve & sleep 3 && ollama pull {{ item.item.tag }} && echo PULL_COMPLETE"],"volumeMounts":[{"name":"data","mountPath":"/root/.ollama"}]}]}}'
+          loop: "{{ ollama_check.results }}"
+          when: item.stdout is not defined or item.stdout.strip() != "ok"
+          register: ollama_pull
+          changed_when: ollama_pull.stdout is defined and 'PULL_COMPLETE' in ollama_pull.stdout
+          timeout: 3600
 
-    - name: Show Ollama checksum results
-      debug:
-        msg: "{{ item.item.name }}: {{ item.stdout }}"
-      loop: "{{ ollama_verify.results }}"
+        - name: Verify Ollama model SHA256 checksums
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run verify-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","manifest=$(find /data/manifests -type f 2>/dev/null | head -1); if [ -z \"$manifest\" ]; then echo SKIP; exit 0; fi; failed=0; for digest in $(grep -oE sha256:[a-f0-9]+ \"$manifest\"); do blob=/data/blobs/$(echo $digest | tr : -); expected=$(echo $digest | cut -d: -f2); if [ ! -f \"$blob\" ]; then echo FAIL:missing:$digest; failed=1; continue; fi; actual=$(sha256sum \"$blob\" | cut -d\" \" -f1); size=$(du -h \"$blob\" | cut -f1); if [ \"$actual\" = \"$expected\" ]; then echo PASS:$size:$digest; else echo FAIL:$size:$digest; failed=1; fi; done; exit $failed"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ models.values() | selectattr('source', 'equalto', 'ollama') | list }}"
+          register: ollama_verify
+          timeout: 600
 
-    # ── Check existing HuggingFace models ────────────────────────
-    - name: Check HuggingFace model integrity in PVCs
-      become: true
-      become_user: "{{ local_user }}"
-      command: >
-        kubectl run check-hf-{{ item.name }} --rm -i --restart=Never
-        -n {{ item.namespace }}
-        --image=busybox:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if [ -f /data/config.json ]; then incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
-      register: hf_check
-      changed_when: false
-      timeout: 120
+        - name: Show Ollama checksum results
+          debug:
+            msg: "{{ item.item.name }}: {{ item.stdout }}"
+          loop: "{{ ollama_verify.results }}"
+      rescue:
+        - name: Ollama download/verify failed (continuing to HuggingFace)
+          debug:
+            msg: "WARNING: Ollama model download or verification failed. Check errors above."
 
-    # ── Download missing HuggingFace models ──────────────────────
-    - name: Download missing HuggingFace models
-      become: true
-      become_user: "{{ local_user }}"
-      command: >
-        kubectl run hf-pull-{{ item.item.name }} --rm -i --restart=Never
-        -n {{ item.item.namespace }}
-        --image=python:3.12-slim
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.tag }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ hf_check.results }}"
-      when: item.stdout is not defined or item.stdout.strip() != "ok"
-      register: hf_pull
-      changed_when: hf_pull.stdout is defined and 'HF_PULL_COMPLETE' in hf_pull.stdout
-      timeout: 1800
+    # ── HuggingFace models (check → pull → verify) ─────────────
+    - name: Download and verify HuggingFace models
+      block:
+        - name: Check HuggingFace model integrity in PVCs
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run check-hf-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"check","image":"busybox:latest","command":["sh","-c","if [ -f /data/config.json ]; then incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo incomplete; else echo ok; fi; else echo missing; fi"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
+          register: hf_check
+          changed_when: false
+          timeout: 120
 
-    # ── Verify HuggingFace integrity ─────────────────────────────
-    - name: Verify HuggingFace model integrity
-      become: true
-      become_user: "{{ local_user }}"
-      command: >
-        kubectl run verify-hf-{{ item.name }} --rm -i --restart=Never
-        -n {{ item.namespace }}
-        --image=busybox:latest
-        --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","if [ ! -f /data/config.json ]; then echo SKIP; exit 0; fi; incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo FAIL:incomplete; exit 1; fi; for sf in /data/*.safetensors; do [ -f \"$sf\" ] || continue; size=$(du -h \"$sf\" | cut -f1); hash=$(sha256sum \"$sf\" | cut -d\" \" -f1); echo PASS:$size:$(basename $sf):sha256:$hash; done; echo ok"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
-      loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
-      register: hf_verify
-      timeout: 600
+        - name: Download missing HuggingFace models
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run hf-pull-{{ item.item.name }} --rm -i --restart=Never
+            -n {{ item.item.namespace }}
+            --image=python:3.12-slim
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.item.pvc }}"}}],"containers":[{"name":"pull","image":"python:3.12-slim","command":["sh","-c","pip install -q huggingface_hub hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c \"from huggingface_hub import snapshot_download; snapshot_download('"'"'{{ item.item.tag }}'"'"', local_dir='"'"'/data'"'"'); print('"'"'HF_PULL_COMPLETE'"'"')\""],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ hf_check.results }}"
+          when: item.stdout is not defined or item.stdout.strip() != "ok"
+          register: hf_pull
+          changed_when: hf_pull.stdout is defined and 'HF_PULL_COMPLETE' in hf_pull.stdout
+          timeout: 1800
 
-    - name: Show HuggingFace checksum results
-      debug:
-        msg: "{{ item.item.name }}: {{ item.stdout }}"
-      loop: "{{ hf_verify.results }}"
+        - name: Verify HuggingFace model integrity
+          become: true
+          become_user: "{{ local_user }}"
+          command: >
+            kubectl run verify-hf-{{ item.name }} --rm -i --restart=Never
+            -n {{ item.namespace }}
+            --image=busybox:latest
+            --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"{{ item.pvc }}"}}],"containers":[{"name":"verify","image":"busybox:latest","command":["sh","-c","if [ ! -f /data/config.json ]; then echo SKIP; exit 0; fi; incomplete=$(find /data -name *.incomplete 2>/dev/null | wc -l); if [ $incomplete -gt 0 ]; then echo FAIL:incomplete; exit 1; fi; for sf in /data/*.safetensors; do [ -f \"$sf\" ] || continue; size=$(du -h \"$sf\" | cut -f1); hash=$(sha256sum \"$sf\" | cut -d\" \" -f1); echo PASS:$size:$(basename $sf):sha256:$hash; done; echo ok"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
+          loop: "{{ models.values() | selectattr('source', 'equalto', 'huggingface') | list }}"
+          register: hf_verify
+          timeout: 600
+
+        - name: Show HuggingFace checksum results
+          debug:
+            msg: "{{ item.item.name }}: {{ item.stdout }}"
+          loop: "{{ hf_verify.results }}"
+      rescue:
+        - name: HuggingFace download/verify failed
+          debug:
+            msg: "WARNING: HuggingFace model download or verification failed. Check errors above."
 
     # ── Summary ──────────────────────────────────────────────────
     - name: Show PVC status

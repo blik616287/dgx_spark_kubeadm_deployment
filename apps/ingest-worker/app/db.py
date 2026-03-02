@@ -80,6 +80,16 @@ async def mark_job_started(job_id: str):
     )
 
 
+async def mark_job_indexing(job_id: str, result: dict):
+    pool = get_pool()
+    await pool.execute(
+        """UPDATE orchestrator_ingest_jobs
+           SET status = 'indexing', result = $2::jsonb
+           WHERE id = $1""",
+        job_id, json.dumps(result),
+    )
+
+
 async def mark_job_completed(job_id: str, result: dict):
     pool = get_pool()
     await pool.execute(

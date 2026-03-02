@@ -380,6 +380,19 @@
         msg: "Allocatable GPU slots: {{ gpu_count.stdout }} (time-sliced from 1 physical GPU)"
 
     # ── Longhorn Distributed Storage ─────────────────────────────
+    - name: Blacklist Longhorn devices from multipathd
+      copy:
+        dest: /etc/multipath.conf
+        content: |
+          defaults {
+              user_friendly_names yes
+          }
+
+          blacklist {
+              devnode "^sd[a-z0-9]+"
+          }
+      notify: Restart multipathd
+
     - name: Enable and start iscsid
       systemd:
         name: iscsid
@@ -630,3 +643,9 @@
     - name: Display final status
       debug:
         var: final_status.stdout_lines
+
+  handlers:
+    - name: Restart multipathd
+      systemd:
+        name: multipathd
+        state: restarted

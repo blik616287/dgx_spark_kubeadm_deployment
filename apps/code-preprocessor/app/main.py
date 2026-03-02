@@ -86,7 +86,7 @@ async def ingest(
                     result = parse_file(file_path, text, language)
                     resp = await client.post(
                         f"{LIGHTRAG_URL}/documents/text",
-                        json={"text": result.document},
+                        json={"text": result.document, "file_source": file_path},
                         headers={"LIGHTRAG-WORKSPACE": x_workspace},
                     )
                     resp.raise_for_status()
@@ -109,7 +109,7 @@ async def ingest(
                             label = f"{file_path} (pages {page_start}-{page_end})"
                             resp = await client.post(
                                 f"{LIGHTRAG_URL}/documents/text",
-                                json={"text": f"# {label}\n\n{chunk}"},
+                                json={"text": f"# {label}\n\n{chunk}", "file_source": file_path},
                                 headers={"LIGHTRAG-WORKSPACE": x_workspace},
                             )
                             resp.raise_for_status()
@@ -118,7 +118,7 @@ async def ingest(
                         text = content.decode("utf-8", errors="replace")
                         resp = await client.post(
                             f"{LIGHTRAG_URL}/documents/text",
-                            json={"text": text},
+                            json={"text": text, "file_source": file_path},
                             headers={"LIGHTRAG-WORKSPACE": x_workspace},
                         )
                         resp.raise_for_status()
@@ -147,7 +147,7 @@ async def ingest(
                         result = parse_file(synthetic_name, block.code, block.language)
                         resp = await client.post(
                             f"{LIGHTRAG_URL}/documents/text",
-                            json={"text": result.document},
+                            json={"text": result.document, "file_source": synthetic_name},
                             headers={"LIGHTRAG-WORKSPACE": x_workspace},
                         )
                         resp.raise_for_status()
@@ -164,7 +164,7 @@ async def ingest(
                     text = content.decode("utf-8", errors="replace")
                     resp = await client.post(
                         f"{LIGHTRAG_URL}/documents/text",
-                        json={"text": text},
+                        json={"text": text, "file_source": file_path},
                         headers={"LIGHTRAG-WORKSPACE": x_workspace},
                     )
                     resp.raise_for_status()

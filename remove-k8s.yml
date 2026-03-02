@@ -7,6 +7,12 @@
     kubeconfig: "/home/{{ ansible_env.SUDO_USER | default('b') }}/.kube/config"
 
   tasks:
+    - name: Remove Longhorn data
+      file:
+        path: /var/lib/longhorn
+        state: absent
+      failed_when: false
+
     - name: Drain node
       become: true
       become_user: "{{ local_user }}"
@@ -21,8 +27,9 @@
       become: true
       become_user: "{{ local_user }}"
       shell: |
-        for ns in $(helm list -A -q 2>/dev/null); do
-          helm uninstall "$ns" -n "$(helm list -A --filter "$ns" -o json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['namespace'])")" 2>/dev/null
+        for release in $(helm list -A --short 2>/dev/null); do
+          ns=$(helm list -A --filter "^${release}$" -o json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['namespace'])")
+          timeout 120 helm uninstall "$release" -n "$ns" --wait=false 2>/dev/null || true
         done
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
@@ -40,12 +47,6 @@
         done
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      failed_when: false
-
-    - name: Remove Longhorn data
-      file:
-        path: /var/lib/longhorn
-        state: absent
       failed_when: false
 
     - name: Reset kubeadm
