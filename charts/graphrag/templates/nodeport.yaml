@@ -72,3 +72,22 @@ spec:
       name: http
 {{- end }}
 {{- end }}
+{{- if .Values.ingestionUi.enabled }}
+{{- if .Values.ingestionUi.nodePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-ui-nodeport
+  namespace: {{ .Values.namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: ingestion-ui
+  ports:
+    - port: {{ .Values.ingestionUi.port }}
+      targetPort: {{ .Values.ingestionUi.port }}
+      nodePort: {{ .Values.ingestionUi.nodePort }}
+      name: http
+{{- end }}
+{{- end }}

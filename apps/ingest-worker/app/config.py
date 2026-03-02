@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # Code Preprocessor
     preprocessor_url: str = "http://code-preprocessor:8090"
 
+    # LightRAG
+    lightrag_url: str = "http://lightrag:9621"
+    indexing_poll_timeout: int = 300
+    indexing_poll_interval: int = 5
+
     # Worker config
     max_redeliveries: int = 3
     ack_wait_seconds: int = 600

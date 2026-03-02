@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import io
 import logging
@@ -95,6 +96,29 @@ async def process_codebase(
         "documents_sent": total_docs,
         "errors": errors,
     }
+
+
+async def poll_lightrag_done(
+    workspace: str, lightrag_url: str, timeout: int = 300, interval: int = 5
+) -> bool:
+    """Poll LightRAG pipeline_status until extraction finishes. Returns True if timed out."""
+    elapsed = 0
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while elapsed < timeout:
+            try:
+                resp = await client.get(
+                    f"{lightrag_url}/documents/pipeline_status",
+                    headers={"LIGHTRAG-WORKSPACE": workspace},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if not data.get("busy") and not data.get("request_pending"):
+                        return False
+            except Exception as e:
+                logger.warning(f"LightRAG poll error: {e}")
+            await asyncio.sleep(interval)
+            elapsed += interval
+    return True
 
 
 def _extract_archive(data: bytes, filename: str) -> list[tuple[str, bytes]]:

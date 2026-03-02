@@ -1,0 +1,14 @@
+{{- if .Values.ingestionUi.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-ui
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: ingestion-ui
+  ports:
+    - port: {{ .Values.ingestionUi.port }}
+      targetPort: {{ .Values.ingestionUi.port }}
+      name: http
+{{- end }}
