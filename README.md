@@ -209,3 +209,7 @@ ansible-playbook -i inventory.ini remove-k8s.yml --become
 ```
 
 `remove-models.yml` and `remove-graphrag.yml` uninstall Helm releases and delete namespaces but preserve model and data files on disk. `remove-k8s.yml` removes the entire cluster, packages, and network configuration; containerd and the NVIDIA runtime are left installed.
+
+## License
+
+[MIT](LICENSE) © 2026 Martin Forde <mforde84@gmail.com>, [Blik Labs](https://bliklabs.com).
