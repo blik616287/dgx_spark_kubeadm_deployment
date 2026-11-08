@@ -1,0 +1,45 @@
+# TLS in front of the gateway. The gateway itself serves plain HTTP inside the
+# cluster; an Ingress with a cert-manager Certificate is the edge that holds
+# the public name and the certificate. Rendered only when dgx_gateway_tls is
+# true, and the role refuses to render it without a host and an issuer.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ dgx_gateway_tls_secret }}
+  namespace: {{ dgx_gateway_namespace }}
+  labels:
+    app: litellm
+spec:
+  secretName: {{ dgx_gateway_tls_secret }}
+  dnsNames:
+    - {{ dgx_gateway_host | to_json }}
+  issuerRef:
+    name: {{ dgx_gateway_cluster_issuer }}
+    kind: ClusterIssuer
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm
+  namespace: {{ dgx_gateway_namespace }}
+  labels:
+    app: litellm
+  annotations:
+    cert-manager.io/cluster-issuer: {{ dgx_gateway_cluster_issuer }}
+spec:
+  ingressClassName: {{ dgx_gateway_ingress_class }}
+  tls:
+    - hosts:
+        - {{ dgx_gateway_host | to_json }}
+      secretName: {{ dgx_gateway_tls_secret }}
+  rules:
+    - host: {{ dgx_gateway_host | to_json }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: litellm
+                port:
+                  number: {{ dgx_gateway_port }}

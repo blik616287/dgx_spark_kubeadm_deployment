@@ -1,0 +1,5 @@
+---
+ansible_host: "{{ dgx_ssh_host }}"
+ansible_port: "{{ dgx_ssh_port }}"
+ansible_user: "{{ dgx_ssh_user }}"
+ansible_ssh_private_key_file: "{{ dgx_ssh_key }}"

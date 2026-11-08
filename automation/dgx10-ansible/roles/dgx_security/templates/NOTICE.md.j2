@@ -1,0 +1,16 @@
+# Licences — third-party models in this deployment
+
+Generated {{ ansible_date_time.iso8601 | default('') }} from `catalog/models.yaml`.
+The licence is the catalog's record of what the weights are published under;
+check the model card before redistribution or commercial use.
+
+| Model | Tag | Licence |
+|---|---|---|
+{% for name, entry in dgx_catalog_meta.items() %}
+{% if name in dgx_served_models %}
+| {{ entry.display_name | default(name) }} | `{{ entry.tag }}` | {{ entry.license | default('unknown') }} |
+{% endif %}
+{% endfor %}
+
+Framework code, the upstream deployment repo and the Helm charts carry their
+own licences; this file covers the model weights only.

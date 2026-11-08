@@ -1,0 +1,8 @@
+---
+# End-to-end evidence that the cluster and the models are actually serving.
+- name: Verify the dgx10 deployment
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - dgx_verify

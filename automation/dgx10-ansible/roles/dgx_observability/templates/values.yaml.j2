@@ -1,0 +1,36 @@
+grafana:
+  adminPassword: {{ dgx_grafana_password | to_json }}
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  persistence:
+    enabled: true
+    storageClassName: longhorn
+    size: 10Gi
+prometheus:
+  prometheusSpec:
+    retention: {{ dgx_observability_retention }}
+    # Select ServiceMonitors by label across namespaces, so the GPU operator's
+    # exporter (in gpu-operator) is scraped without moving it.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelector: {}
+    nodeSelector:
+      kubernetes.io/arch: arm64
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+alertmanager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

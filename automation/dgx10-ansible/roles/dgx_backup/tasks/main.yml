@@ -1,0 +1,192 @@
+---
+# Durability for model weights. Longhorn on a single node keeps one replica;
+# a snapshot protects against a bad write, and a backup (to a configured
+# target) protects against losing the node. Neither is a substitute for a
+# weights re-pull, which is why the catalog keeps the exact tags.
+
+- name: Resolve the PVCs to protect
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", get, pvc, --no-headers,
+           -o, custom-columns=NAME:.metadata.name]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_backup_pvc_list
+  changed_when: false
+
+- name: Select the PVCs
+  ansible.builtin.set_fact:
+    dgx_backup_targets: >-
+      {{ dgx_backup_pvcs if dgx_backup_pvcs | length > 0
+         else (dgx_backup_pvc_list.stdout_lines
+               | map('split') | map('first')
+               | select('match', '^(ollama-|vllm-)') | list) }}
+
+- name: Require something to protect
+  ansible.builtin.assert:
+    that:
+      - dgx_backup_targets | length > 0
+    fail_msg: >-
+      No model PVCs found in {{ dgx_models_namespace }} and dgx_backup_pvcs is
+      empty. Pass -e '{"dgx_backup_pvcs": ["ollama-qwen3-coder-next"]}'.
+    quiet: true
+
+- name: Require a backup target for a backup
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, get, setting, backup-target,
+           -o, "jsonpath={.value}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_backup_target_setting
+  changed_when: false
+  when: dgx_backup_action == 'backup'
+
+- name: Stop when a backup has nowhere to go
+  ansible.builtin.assert:
+    that:
+      - dgx_backup_target_setting.stdout | trim | length > 0
+    fail_msg: >-
+      The Longhorn backup target is unset, so a Backup has nowhere to write.
+      Set it (kubectl -n longhorn-system edit setting backup-target) or run
+      with dgx_backup_action=snapshot.
+    quiet: true
+  when: dgx_backup_action == 'backup'
+
+- name: Resolve each PVC's Longhorn volume
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", get, pvc, "{{ item }}",
+           -o, "jsonpath={.spec.volumeName}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_backup_targets }}"
+  register: dgx_backup_volumes
+  changed_when: false
+
+# ── Schedule ────────────────────────────────────────────────────────
+# A RecurringJob protects new writes between playbook runs. Longhorn only
+# applies it to volumes labelled with the job group, so both are needed.
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+  when: dgx_backup_schedule | length > 0
+
+- name: Create or update the snapshot schedule
+  ansible.builtin.template:
+    src: recurringjob.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/longhorn-recurringjob.yaml"
+    mode: "0644"
+  when: dgx_backup_schedule | length > 0
+
+- name: Apply the snapshot schedule
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/longhorn-recurringjob.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_backup_schedule_apply
+  changed_when: "'created' in dgx_backup_schedule_apply.stdout or 'configured' in dgx_backup_schedule_apply.stdout"
+  when: dgx_backup_schedule | length > 0
+
+- name: Put each volume in the schedule's group
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, label, volume, "{{ item.stdout }}",
+           "recurring-job-group.longhorn.io/{{ dgx_backup_group }}=enabled", --overwrite]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_backup_volumes.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  # kubectl label is idempotent; reporting "changed" every run would be noise.
+  changed_when: false
+  when:
+    - dgx_backup_schedule | length > 0
+    - item.stdout | trim | length > 0
+
+- name: Say that protection is manual
+  ansible.builtin.debug:
+    msg: >-
+      dgx_backup_schedule is empty, so only this run's
+      {{ dgx_backup_action }} protects the volumes. Set SCHEDULE='0 3 * * *'
+      to add a Longhorn RecurringJob.
+  when: dgx_backup_schedule | length == 0
+
+- name: Snapshot each volume
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, -]
+    stdin: |
+      apiVersion: longhorn.io/v1beta2
+      kind: Snapshot
+      metadata:
+        name: {{ dgx_backup_name }}-{{ item.item }}
+        namespace: longhorn-system
+        labels:
+          dgx10/action: snapshot
+          dgx10/pvc: "{{ item.item }}"
+      spec:
+        volume: {{ item.stdout }}
+        labels:
+          dgx10/pvc: "{{ item.item }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_backup_volumes.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: dgx_backup_snapshots
+  changed_when: "'created' in dgx_backup_snapshots.stdout"
+  when:
+    - dgx_backup_action == 'snapshot'
+    - item.stdout | trim | length > 0
+
+- name: Back each volume up to the configured target
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, -]
+    stdin: |
+      apiVersion: longhorn.io/v1beta2
+      kind: Backup
+      metadata:
+        name: {{ dgx_backup_name }}-{{ item.item }}
+        namespace: longhorn-system
+        labels:
+          dgx10/action: backup
+          dgx10/pvc: "{{ item.item }}"
+      spec:
+        volume: {{ item.stdout }}
+        labels:
+          dgx10/pvc: "{{ item.item }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_backup_volumes.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: dgx_backup_runs
+  changed_when: "'created' in dgx_backup_runs.stdout"
+  when:
+    - dgx_backup_action == 'backup'
+    - item.stdout | trim | length > 0
+
+- name: Wait for the backups to complete
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, get, backup,
+           "{{ dgx_backup_name }}-{{ item.item }}",
+           -o, "jsonpath={.status.state}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_backup_volumes.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: dgx_backup_state
+  changed_when: false
+  until: dgx_backup_state.stdout | trim == 'Completed'
+  retries: 60
+  delay: 10
+  when:
+    - dgx_backup_action == 'backup'
+    - dgx_backup_wait | bool
+    - item.stdout | trim | length > 0
+
+- name: Show what was protected
+  ansible.builtin.debug:
+    msg: >-
+      {{ dgx_backup_action }} {{ dgx_backup_name }}:
+      {{ dgx_backup_targets | join(', ') }}

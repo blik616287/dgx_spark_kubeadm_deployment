@@ -1,0 +1,201 @@
+# Restore a Longhorn snapshot or backup into a NEW volume and PVC.
+#
+# Nothing is overwritten. The source volume keeps serving, and the restored
+# copy is a separate claim you can inspect, mount, or delete. That is the only
+# safe shape for a restore on a single-node cluster: a restore over a live
+# volume cannot be undone if it is the wrong snapshot.
+#
+# `dgx_restore_kind: auto` probes the Snapshot CR first, then the Backup CR.
+
+- name: Require a restore source
+  ansible.builtin.assert:
+    that:
+      - dgx_restore_name | length > 0
+      - dgx_restore_kind in ['auto', 'snapshot', 'backup']
+    fail_msg: >-
+      Pass -e dgx_restore_name=<snapshot-or-backup> (make restore NAME=...).
+      dgx_restore_kind is one of auto, snapshot, backup.
+    quiet: true
+
+- name: Look for a Longhorn Snapshot with that name
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, get, snapshot, "{{ dgx_restore_name }}", -o, json]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_snapshot
+  changed_when: false
+  failed_when: false
+  when: dgx_restore_kind in ['auto', 'snapshot']
+
+- name: Look for a Longhorn Backup with that name
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, get, backup, "{{ dgx_restore_name }}", -o, json]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_backup
+  changed_when: false
+  failed_when: false
+  when: dgx_restore_kind in ['auto', 'backup']
+
+- name: Resolve which kind was found
+  ansible.builtin.set_fact:
+    dgx_restore_resolved: >-
+      {{ 'snapshot' if (dgx_restore_snapshot.rc | default(1)) == 0
+         else ('backup' if (dgx_restore_backup.rc | default(1)) == 0 else '') }}
+
+- name: Stop when neither exists
+  ansible.builtin.fail:
+    msg: >-
+      No Longhorn Snapshot or Backup named {{ dgx_restore_name }}.
+      Existing snapshots: `kubectl -n longhorn-system get snapshot`;
+      existing backups: `kubectl -n longhorn-system get backup`.
+  when: dgx_restore_resolved | length == 0
+
+- name: Record the source details
+  ansible.builtin.set_fact:
+    dgx_restore_kind: "{{ dgx_restore_resolved }}"
+    dgx_restore_source_volume: >-
+      {{ (dgx_restore_snapshot.stdout | from_json).spec.volume
+         if dgx_restore_resolved == 'snapshot'
+         else ((dgx_restore_backup.stdout | from_json).status.volumeName | default('')) }}
+    dgx_restore_snapshot_name: >-
+      {{ dgx_restore_name if dgx_restore_resolved == 'snapshot' else '' }}
+    dgx_restore_backup_url: >-
+      {{ '' if dgx_restore_resolved == 'snapshot'
+         else ((dgx_restore_backup.stdout | from_json).status.url | default('')) }}
+    dgx_restore_source_pvc: >-
+      {{ (((dgx_restore_snapshot.stdout | from_json) if dgx_restore_resolved == 'snapshot'
+           else (dgx_restore_backup.stdout | from_json)).metadata.labels | default({}))
+         ['dgx10/pvc'] | default('') }}
+
+- name: Require a restorable backup URL
+  ansible.builtin.assert:
+    that:
+      - dgx_restore_backup_url | length > 0
+    fail_msg: >-
+      The Backup {{ dgx_restore_name }} has no status.url yet, so there is
+      nothing to restore from. Wait for it to reach Completed.
+    quiet: true
+  when: dgx_restore_kind == 'backup'
+
+- name: Resolve the new PVC name
+  ansible.builtin.set_fact:
+    dgx_restore_pvc: >-
+      {{ dgx_restore_pvc if dgx_restore_pvc | length > 0
+         else ((dgx_restore_source_pvc if dgx_restore_source_pvc | length > 0
+                else dgx_restore_source_volume) + '-restored-' + dgx_report_stamp) }}
+
+- name: Find the size of the source PVC
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", get, pvc,
+           "{{ dgx_restore_source_pvc }}", -o, "jsonpath={.spec.resources.requests.storage}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_source_size
+  changed_when: false
+  failed_when: false
+  when:
+    - dgx_restore_size | length == 0
+    - dgx_restore_source_pvc | length > 0
+
+- name: Resolve the restore size
+  ansible.builtin.set_fact:
+    dgx_restore_size_resolved: >-
+      {{ dgx_restore_size if dgx_restore_size | length > 0
+         else (dgx_restore_source_size.stdout | default('') | trim) }}
+
+- name: Require a size for the new volume
+  ansible.builtin.assert:
+    that:
+      - dgx_restore_size_resolved | length > 0
+    fail_msg: >-
+      The source PVC {{ dgx_restore_source_pvc }} is gone and dgx_restore_size
+      is empty. Pass -e dgx_restore_size=60Gi.
+    quiet: true
+
+- name: Convert the size to bytes for the Longhorn Volume
+  ansible.builtin.set_fact:
+    dgx_restore_size_bytes: >-
+      {{ (dgx_restore_size_resolved | regex_replace('[^0-9]', '') | int)
+         * (1024 ** 3 if dgx_restore_size_resolved is search('Gi$')
+            else 1024 ** 2 if dgx_restore_size_resolved is search('Mi$')
+            else 1024 ** 3 if dgx_restore_size_resolved is search('G$')
+            else 1024 ** 2 if dgx_restore_size_resolved is search('M$')
+            else 1) }}
+
+- name: Refuse to overwrite an existing claim
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", get, pvc,
+           "{{ dgx_restore_pvc }}", -o, name]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_existing
+  changed_when: false
+  failed_when: false
+
+- name: Stop when the target PVC already exists
+  ansible.builtin.fail:
+    msg: >-
+      PVC {{ dgx_restore_pvc }} already exists. Restores never overwrite:
+      delete it first or pass -e dgx_restore_pvc=<another-name>.
+  when: dgx_restore_existing.rc == 0
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the restore manifests
+  ansible.builtin.template:
+    src: restore.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/restore.yaml"
+    mode: "0644"
+
+- name: Create the volume, PV and PVC
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/restore.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_apply
+  changed_when: "'created' in dgx_restore_apply.stdout or 'configured' in dgx_restore_apply.stdout"
+
+- name: Wait for the restore to bind
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", wait,
+           "pvc/{{ dgx_restore_pvc }}", "--for=jsonpath={.status.phase}=Bound",
+           "--timeout={{ dgx_restore_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_wait_run
+  changed_when: false
+  when: dgx_restore_wait | bool
+
+- name: Report the failure with the volume state
+  ansible.builtin.command:
+    argv: [kubectl, -n, longhorn-system, get, volume, "{{ dgx_restore_pvc }}", -o, yaml]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_restore_volume_state
+  changed_when: false
+  failed_when: false
+  when:
+    - dgx_restore_wait | bool
+    - dgx_restore_wait_run.rc != 0
+
+- name: Fail with the volume state when the restore did not bind
+  ansible.builtin.fail:
+    msg: |
+      PVC {{ dgx_restore_pvc }} did not reach Bound within {{ dgx_restore_timeout }}.
+      --- Longhorn Volume ---
+      {{ dgx_restore_volume_state.stdout | default('volume not found') }}
+  when:
+    - dgx_restore_wait | bool
+    - dgx_restore_wait_run.rc != 0
+
+- name: Show what was restored
+  ansible.builtin.debug:
+    msg:
+      - "Restored {{ dgx_restore_name }} ({{ dgx_restore_kind }}) into pvc/{{ dgx_restore_pvc }}"
+      - "Size: {{ dgx_restore_size }}; the source volume is untouched"
+      - "Mount it in a pod, or copy files out, then delete the PVC to reclaim it."

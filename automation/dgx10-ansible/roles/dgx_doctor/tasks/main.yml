@@ -1,0 +1,78 @@
+---
+# Read-only diagnosis. The script does the checking; this role makes its
+# findings visible and turns ERROR into a failed play. It changes nothing on
+# the cluster, so it is safe to run at any point.
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy the doctor script to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_framework_dir }}/scripts/doctor.sh"
+    dest: "{{ dgx_remote_state_dir }}/doctor.sh"
+    mode: "0755"
+
+- name: Run the doctor
+  ansible.builtin.command:
+    argv: "{{ [dgx_remote_state_dir + '/doctor.sh'] + dgx_served_models }}"
+  environment:
+    KUBECTL: kubectl
+    DGX_NAMESPACE: "{{ dgx_models_namespace }}"
+    DGX_MAX_GPU_SLICES: "{{ dgx_max_gpu_pods | string }}"
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_doctor_run
+  changed_when: false
+  failed_when: false
+
+- name: Parse the findings
+  ansible.builtin.set_fact:
+    dgx_doctor_findings: >-
+      {{ dgx_doctor_findings | default([]) + [{
+        'level': (item.split('\t') + ['', '', '', ''])[0],
+        'check': (item.split('\t') + ['', '', '', ''])[1],
+        'detail': (item.split('\t') + ['', '', '', ''])[2],
+        'fix': (item.split('\t') + ['', '', '', ''])[3],
+      }] }}
+  loop: "{{ dgx_doctor_run.stdout_lines | reject('match', '^SUMMARY') | list }}"
+  loop_control:
+    label: "{{ item.split('\t')[0:2] | join(' ') }}"
+
+- name: Count the findings by level
+  ansible.builtin.set_fact:
+    dgx_doctor_errors: "{{ dgx_doctor_findings | selectattr('level', 'equalto', 'ERROR') | list | length }}"
+    dgx_doctor_warnings: "{{ dgx_doctor_findings | selectattr('level', 'equalto', 'WARN') | list | length }}"
+
+- name: Show the findings
+  ansible.builtin.debug:
+    msg: >-
+      {{ dgx_doctor_findings
+         | map(attribute='level') | zip(dgx_doctor_findings | map(attribute='check'))
+         | map('join', '  ') | zip(dgx_doctor_findings | map(attribute='detail'))
+         | map('join', '  ') | list }}
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write the doctor report
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/doctor-latest.txt"
+    mode: "0644"
+    content: "{{ dgx_doctor_run.stdout }}\n"
+  delegate_to: localhost
+
+- name: Fail when the doctor found an error
+  ansible.builtin.fail:
+    msg: >-
+      {{ dgx_doctor_errors }} ERROR finding(s) and {{ dgx_doctor_warnings }}
+      warning(s). Read {{ dgx_report_dir }}/doctor-latest.txt for the fixes.
+      Pass dgx_doctor_allow_errors=true to report without stopping.
+  when:
+    - dgx_doctor_errors | int > 0
+    - not (dgx_doctor_allow_errors | bool)

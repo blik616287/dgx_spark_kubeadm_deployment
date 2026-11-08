@@ -1,0 +1,9 @@
+---
+# Render the Argo CD tree for the current selection. Applying it needs Argo CD
+# and is off by default.
+- name: Render the GitOps tree
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - dgx_gitops

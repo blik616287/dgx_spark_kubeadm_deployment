@@ -1,0 +1,19 @@
+# Ansible
+*.retry
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+.pytest_cache/
+
+# Generated outputs. reports/ holds plan/verify/doctor/eval output and the
+# rendered GitOps tree; it is written by a run, never edited by hand.
+reports/
+
+# Local overrides. settings.local.json is this machine's permission mode.
+.claude/settings.local.json
+
+# Logs
+*.log

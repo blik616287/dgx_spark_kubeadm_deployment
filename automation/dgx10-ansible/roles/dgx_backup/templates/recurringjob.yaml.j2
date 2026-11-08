@@ -1,0 +1,17 @@
+# Scheduled snapshots (or backups) without a playbook run. Longhorn applies a
+# RecurringJob to every volume that carries the group label below, which the
+# backup role adds to each model volume.
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: {{ dgx_backup_recurring_name }}
+  namespace: longhorn-system
+  labels:
+    dgx10/action: schedule
+spec:
+  cron: {{ dgx_backup_schedule | to_json }}
+  task: {{ dgx_backup_schedule_type }}
+  retain: {{ dgx_backup_retain | int }}
+  concurrency: 1
+  groups:
+    - {{ dgx_backup_group }}

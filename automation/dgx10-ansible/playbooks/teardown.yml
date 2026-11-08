@@ -1,0 +1,63 @@
+---
+# The order matters: GraphRAG consumes models, models consume the cluster.
+# Each step is a separate upstream playbook and is skipped if absent.
+- name: Tear down the dgx10 deployment
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_repo
+  tasks:
+    - name: Stat the teardown playbooks
+      ansible.builtin.stat:
+        path: "{{ dgx_repo_dir }}/{{ item }}"
+      loop: "{{ dgx_teardown_playbooks }}"
+      register: dgx_teardown_files
+
+    - name: Run each teardown playbook that exists
+      ansible.builtin.command:
+        argv:
+          - ansible-playbook
+          - -i
+          - "{{ dgx_inner_inventory }}"
+          - "{{ item.item }}"
+          - --become
+          - -e
+          - "local_user={{ dgx_local_user }}"
+          - -e
+          - "kubeconfig={{ dgx_kubeconfig }}"
+      args:
+        chdir: "{{ dgx_repo_dir }}"
+      environment:
+        ANSIBLE_HOST_KEY_CHECKING: "false"
+        ANSIBLE_FORCE_COLOR: "false"
+        KUBECONFIG: "{{ dgx_kubeconfig }}"
+      loop: "{{ dgx_teardown_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stat.exists
+      register: dgx_teardown_run
+      changed_when: true
+
+    - name: Fail with the tail of a failed teardown step
+      ansible.builtin.fail:
+        msg: |
+          {{ item.item.item }} failed (rc={{ item.rc }}).
+          --- last 40 lines ---
+          {{ item.stdout_lines[-40:] | join('\n') }}
+          --- stderr ---
+          {{ item.stderr }}
+      loop: "{{ dgx_teardown_run.results }}"
+      loop_control:
+        label: "{{ item.item.item | default('skipped') }}"
+      when:
+        - item is not skipped
+        - item.rc is defined
+        - item.rc != 0
+
+    - name: Report skipped teardown steps
+      ansible.builtin.debug:
+        msg: "{{ item.item }} not present at {{ dgx_repo_ref }}; skipped"
+      loop: "{{ dgx_teardown_files.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not item.stat.exists

@@ -1,0 +1,129 @@
+---
+# NetworkPolicy and licence notices.
+#
+# A NetworkPolicy is only enforced by a CNI that implements it. The upstream
+# install uses Flannel, which ignores policies: the API accepts them and
+# nothing changes. This role detects the CNI and says so, rather than leaving a
+# false impression of isolation.
+
+- name: Detect the cluster CNI
+  ansible.builtin.command:
+    argv: [kubectl, -n, kube-system, get, pods, --no-headers]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_security_cni_pods
+  changed_when: false
+
+- name: Identify whether the CNI enforces NetworkPolicy
+  ansible.builtin.set_fact:
+    dgx_security_cni: >-
+      {{ 'cilium' if dgx_security_cni_pods.stdout is search('cilium')
+         else ('calico' if dgx_security_cni_pods.stdout is search('calico')
+         else 'flannel') }}
+    dgx_security_enforced: >-
+      {{ dgx_security_cni_pods.stdout is search('cilium')
+         or dgx_security_cni_pods.stdout is search('calico') }}
+
+# Flannel accepts NetworkPolicy objects and ignores them. Calico's policy-only
+# mode adds Felix beside the existing CNI, so the policies below become real
+# without replacing Flannel or rebooting the node.
+- name: Install Calico in policy-only mode
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_security_calico_manifest }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_security_calico
+  changed_when: "'created' in dgx_security_calico.stdout or 'configured' in dgx_security_calico.stdout"
+  when:
+    - dgx_security_install_policy_engine | bool
+    - not (dgx_security_enforced | bool)
+
+- name: Wait for the policy engine
+  ansible.builtin.command:
+    argv: [kubectl, -n, kube-system, rollout, status,
+           deployment/calico-kube-controllers, --timeout=300s]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_security_calico_rollout
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: dgx_security_calico_rollout.rc == 0
+  when:
+    - dgx_security_install_policy_engine | bool
+    - not (dgx_security_enforced | bool)
+
+- name: Record that policy is now enforced
+  ansible.builtin.set_fact:
+    dgx_security_cni: "calico (policy-only)"
+    dgx_security_enforced: true
+  when:
+    - dgx_security_install_policy_engine | bool
+    - dgx_security_calico is defined
+    - dgx_security_calico.rc == 0
+
+- name: Warn that the policy is declarative only
+  ansible.builtin.debug:
+    msg: >-
+      CNI is {{ dgx_security_cni }}: NetworkPolicy objects will be accepted but
+      not enforced. Install Calico or Cilium to make them effective. The
+      policies are still applied so the intent is recorded and takes effect the
+      day the CNI changes.
+  when: not (dgx_security_enforced | bool)
+
+- name: Stop when enforcement was required
+  ansible.builtin.assert:
+    that:
+      - dgx_security_enforced | bool
+    fail_msg: >-
+      dgx_security_require_enforcement is true but the CNI is
+      {{ dgx_security_cni }}, which does not enforce NetworkPolicy.
+    quiet: true
+  when: dgx_security_require_enforcement | bool
+
+- name: Resolve the model ports the policies must allow
+  ansible.builtin.set_fact:
+    dgx_security_model_ports: >-
+      {{ dgx_catalog_meta.values() | map(attribute='port') | map('int')
+         | unique | sort | list }}
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the network policies
+  ansible.builtin.template:
+    src: networkpolicies.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/networkpolicies.yaml"
+    mode: "0644"
+
+- name: Apply the network policies
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/networkpolicies.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_security_apply
+  changed_when: "'created' in dgx_security_apply.stdout or 'configured' in dgx_security_apply.stdout"
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write the licence notices
+  ansible.builtin.template:
+    src: NOTICE.md.j2
+    dest: "{{ dgx_report_dir }}/NOTICE.md"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Show the outcome
+  ansible.builtin.debug:
+    msg:
+      - "CNI: {{ dgx_security_cni }} (policy enforced: {{ dgx_security_enforced }})"
+      - "Policies applied to: {{ dgx_security_allow_namespaces | join(', ') }}"
+      - "Licence notices: {{ dgx_report_dir }}/NOTICE.md"

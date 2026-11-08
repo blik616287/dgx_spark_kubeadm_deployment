@@ -1,0 +1,91 @@
+---
+# Install Argo CD and register the Application the gitops role rendered.
+#
+# Argo CD is the day-2 path: the model set lives in one Application, so a
+# change is a diff on a manifest instead of a playbook run. The install
+# manifest is pinned to a release tag and applied with kubectl, which makes the
+# install idempotent and easy to inspect.
+
+- name: Require a manifest (URL or local file)
+  ansible.builtin.assert:
+    that:
+      - dgx_argocd_manifest_url | length > 0 or dgx_argocd_manifest_local | length > 0
+    fail_msg: >-
+      Set dgx_argocd_manifest_url (default: the pinned upstream install.yaml)
+      or dgx_argocd_manifest_local for an air-gapped install.
+    quiet: true
+
+- name: Ensure the Argo CD namespace exists
+  ansible.builtin.command:
+    argv: [kubectl, create, namespace, "{{ dgx_argocd_namespace }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_ns
+  changed_when: dgx_argocd_ns.rc == 0
+  failed_when:
+    - dgx_argocd_ns.rc != 0
+    - "'AlreadyExists' not in dgx_argocd_ns.stderr"
+
+- name: Install Argo CD from the local manifest
+  ansible.builtin.command:
+    argv: [kubectl, apply, -n, "{{ dgx_argocd_namespace }}",
+           -f, "{{ dgx_argocd_manifest_local }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_install
+  changed_when: "'created' in dgx_argocd_install.stdout or 'configured' in dgx_argocd_install.stdout"
+  when: dgx_argocd_manifest_local | length > 0
+
+- name: Install Argo CD from the pinned upstream manifest
+  ansible.builtin.command:
+    argv: [kubectl, apply, -n, "{{ dgx_argocd_namespace }}",
+           -f, "{{ dgx_argocd_manifest_url }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_install_url
+  changed_when: "'created' in dgx_argocd_install_url.stdout or 'configured' in dgx_argocd_install_url.stdout"
+  when: dgx_argocd_manifest_local | length == 0
+
+- name: Wait for the Argo CD API server
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_argocd_namespace }}", rollout, status,
+           deployment/argocd-server, "--timeout={{ dgx_argocd_wait_timeout }}s"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_rollout
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: dgx_argocd_rollout.rc == 0
+
+- name: Register the LLM serving Application
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_gitops_dir }}/app.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_app
+  changed_when: "'created' in dgx_argocd_app.stdout or 'configured' in dgx_argocd_app.stdout"
+  # The Application CRD is created by the install above; on a slow API server
+  # the first apply can race it, so retry that specific error.
+  retries: 5
+  delay: 10
+  until: dgx_argocd_app.rc == 0
+  when: dgx_argocd_apply_app | bool
+
+- name: Show the Application state
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_argocd_namespace }}", get, application,
+           "{{ dgx_argocd_app_name }}", -o,
+           "custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_argocd_state
+  changed_when: false
+  failed_when: false
+
+- name: Explain how to reach the Argo CD UI
+  ansible.builtin.debug:
+    msg:
+      - "Argo CD: kubectl -n {{ dgx_argocd_namespace }} port-forward svc/argocd-server 8080:443"
+      - "Application: {{ dgx_argocd_app_name }} ({{ dgx_argocd_state.stdout_lines | default([]) | first | default('not applied') }})"
+      - "Admin password: kubectl -n {{ dgx_argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"

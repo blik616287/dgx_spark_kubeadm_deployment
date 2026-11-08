@@ -1,0 +1,26 @@
+# Client recipes — {{ dgx_served_models | join(', ') }}
+
+The gateway speaks the OpenAI API, so any OpenAI SDK works with two changes:
+point `base_url` at the gateway and use the gateway key instead of a vendor key.
+
+| Setting | Value |
+|---|---|
+| Base URL | `{{ dgx_gateway_endpoint }}` |
+| Model names | {% for name in dgx_served_models %}`{{ name }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+
+The key is not stored in this directory. Read it from the cluster when you
+need it:
+
+```sh
+kubectl -n {{ dgx_gateway_namespace }} get secret litellm-master \
+  -o jsonpath='{.data.master-key}' | base64 -d
+```
+
+Files here:
+
+- `client.env` — exports the two variables the examples read.
+- `python_example.py` — OpenAI Python SDK, streaming and non-streaming.
+- `curl_example.sh` — one request per served model, useful for a quick check.
+
+There is no database configured, so the gateway does not persist spend logs.
+Restarting it loses counters; that is deliberate for a single-node box.

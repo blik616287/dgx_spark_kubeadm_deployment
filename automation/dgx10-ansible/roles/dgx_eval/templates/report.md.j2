@@ -1,0 +1,27 @@
+# Model report card — {{ stamp }}
+
+Floor: {{ floor }}. A score below the floor stops the play unless
+`dgx_eval_allow_fail=true`.
+
+| Model | Score | Passed | Time |
+|---|---|---|---|
+{% for report in reports %}
+| {{ report.model }} | {{ report.score }} | {{ report.passed }}/{{ report.total }} | {{ report.elapsed_s | default('-') }}s |
+{% endfor %}
+
+{% for report in reports %}
+## {{ report.model }}
+
+{% if report.error is defined %}
+Error: `{{ report.error }}`
+{% else %}
+| Case | Result | Response |
+|---|---|---|
+{% for case in report.cases %}
+| {{ case.name }} | {% if case.ok %}PASS{% else %}FAIL{% endif %} | {{ (case.content | default(case.error | default(''))) | replace('|', '\\|') | truncate(120) }} |
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+These cases are fixed and small. A pass says the model can follow a short,
+checkable instruction; it does not measure reasoning, coding or tool use.

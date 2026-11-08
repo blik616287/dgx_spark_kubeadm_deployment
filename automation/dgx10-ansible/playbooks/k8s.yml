@@ -1,0 +1,10 @@
+---
+# install-k8s.yml: containerd + NVIDIA runtime, kubeadm cluster, Flannel,
+# Helm, GPU Operator time-slicing, Longhorn and the longhorn-models SC.
+- name: Install Kubernetes on dgx10
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_preflight
+    - dgx_repo
+    - dgx_cluster

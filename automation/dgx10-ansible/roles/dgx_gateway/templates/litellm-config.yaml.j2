@@ -1,0 +1,107 @@
+# Rendered from catalog/models.yaml. One upstream per served model, so a
+# client names the catalog name and the gateway routes by it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ dgx_gateway_namespace }}
+data:
+  config.yaml: |
+    model_list:
+{% for name, entry in dgx_catalog_meta.items() %}
+{% if name in dgx_served_models %}
+      - model_name: {{ name }}
+        litellm_params:
+          model: openai/{{ entry.tag }}
+          api_base: http://{{ name }}{{ '-predictor' if entry.engine == 'ollama' else '' }}.{{ dgx_models_namespace }}.svc.cluster.local:{{ entry.port | default(11434) }}/v1
+          api_key: ollama
+        model_info:
+          mode: {{ 'embedding' if 'embedding' in entry.capabilities else 'completion' }}
+{% endif %}
+{% endfor %}
+    litellm_settings:
+      drop_params: true
+      request_timeout: 600
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: {{ dgx_gateway_namespace }}
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: litellm
+          image: {{ dgx_gateway_image }}
+          args: ["--config", "/app/config.yaml", "--port", "{{ dgx_gateway_port }}"]
+          ports:
+            - name: http
+              containerPort: {{ dgx_gateway_port }}
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-master
+                  key: master-key
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: {{ dgx_gateway_namespace }}
+  labels:
+    app: litellm
+spec:
+  type: {{ 'NodePort' if dgx_gateway_node_port | int > 0 else 'ClusterIP' }}
+  selector:
+    app: litellm
+  ports:
+    - name: http
+      port: {{ dgx_gateway_port }}
+      targetPort: http
+{% if dgx_gateway_node_port | int > 0 %}
+      nodePort: {{ dgx_gateway_node_port }}
+{% endif %}

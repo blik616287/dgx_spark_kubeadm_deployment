@@ -1,0 +1,125 @@
+---
+# Tokens per joule and dollars per million tokens, from a verify report plus a
+# measured power draw. The draw is averaged over several nvidia-smi readings;
+# it is still a sample of one load point, not an energy meter.
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+# `make power-sample` records the same loop the cost row uses, so a reading can
+# be taken while a benchmark is running and inspected afterwards.
+- name: Sample GPU power draw on the target
+  ansible.builtin.command:
+    argv: [nvidia-smi, --query-gpu=power.draw, "--format=csv,noheader,nounits",
+           -lms, "{{ dgx_power_sample_interval_ms | string }}",
+           -c, "{{ dgx_power_samples | string }}"]
+  register: dgx_power_raw
+  changed_when: false
+  failed_when: false
+  when: dgx_power_sample | bool
+
+- name: Write the raw samples
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/power-samples-{{ dgx_report_stamp }}.txt"
+    mode: "0644"
+    content: "{{ dgx_power_raw.stdout | default('') }}"
+  delegate_to: localhost
+  when: dgx_power_sample | bool
+
+- name: Summarize the samples
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, dgx_framework_dir + '/lib/power_report.py',
+               '--summarize', dgx_report_dir + '/power-samples-' + dgx_report_stamp + '.txt',
+               '--samples', dgx_power_samples | string, '--json'] }}"
+  delegate_to: localhost
+  register: dgx_power_summary
+  changed_when: false
+  failed_when: false
+  when: dgx_power_sample | bool
+
+- name: Show the measured draw
+  ansible.builtin.debug:
+    msg: >-
+      {{ (dgx_power_summary.stdout | from_json) if dgx_power_summary.rc | default(1) == 0
+         else ('no reading: ' + (dgx_power_summary.stderr | default('nvidia-smi unavailable'))) }}
+  when: dgx_power_sample | bool
+
+- name: Stop after sampling when that is all that was asked
+  ansible.builtin.meta: end_play
+  when: dgx_power_sample | bool
+
+- name: Require a verify report to read
+  ansible.builtin.stat:
+    path: "{{ dgx_power_report }}"
+  delegate_to: localhost
+  register: dgx_power_stat
+
+- name: Stop when the verify report is missing
+  ansible.builtin.assert:
+    that:
+      - dgx_power_stat.stat.exists
+    fail_msg: >-
+      {{ dgx_power_report }} does not exist. Run `make verify` first; the power
+      report reads the tokens-per-second the probe measured.
+    quiet: true
+
+- name: Copy the power report to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_framework_dir }}/lib/power_report.py"
+    dest: "{{ dgx_remote_state_dir }}/power_report.py"
+    mode: "0755"
+
+- name: Ensure the remote report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}/reports"
+    state: directory
+    mode: "0755"
+
+- name: Copy the verify report to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_power_report }}"
+    dest: "{{ dgx_remote_state_dir }}/reports/verify.json"
+    mode: "0644"
+
+- name: Compute power and cost per token
+  ansible.builtin.command:
+    argv: "{{ [dgx_probe_python | default('python3'),
+               dgx_remote_state_dir + '/power_report.py',
+               dgx_remote_state_dir + '/reports/verify.json',
+               '--usd-per-kwh', dgx_usd_per_kwh | string,
+               '--samples', dgx_power_samples | string,
+               '--sample-interval-ms', dgx_power_sample_interval_ms | string]
+              + (['--power-watts', dgx_power_watts | string] if dgx_power_watts | float > 0 else [])
+              + (['--idle-watts', dgx_power_idle_watts | string] if dgx_power_idle_watts | float > 0 else []) }}"
+  register: dgx_power_run
+  changed_when: false
+  failed_when: false
+
+- name: Show the power and cost table
+  ansible.builtin.debug:
+    var: dgx_power_run.stdout_lines
+
+- name: Write the power report
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/power-latest.txt"
+    mode: "0644"
+    content: "{{ dgx_power_run.stdout }}\n{{ dgx_power_run.stderr }}"
+  delegate_to: localhost
+
+- name: Explain a missing reading
+  ansible.builtin.fail:
+    msg: >-
+      The power report could not compute a row. nvidia-smi returned no reading
+      and dgx_power_watts is 0. Pass -e dgx_power_watts=<measured draw> with a
+      reading taken while the same model was serving.
+  when: dgx_power_run.rc != 0

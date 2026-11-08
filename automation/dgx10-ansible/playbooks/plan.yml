@@ -1,0 +1,9 @@
+---
+# Plan only: resolve a profile or model set and print the fit table. Nothing
+# runs on the target and nothing is installed. This is the command to run
+# before `make up`.
+- name: Plan the model set against the GB10 budget
+  hosts: dgx
+  gather_facts: false
+  roles:
+    - dgx_plan

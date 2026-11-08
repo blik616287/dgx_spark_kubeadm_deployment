@@ -1,0 +1,7 @@
+---
+# Join additional hosts in the dgx group to the control plane. Needs become.
+- name: Join workers to the cluster
+  hosts: "{{ dgx_join_group | default('dgx') }}"
+  gather_facts: true
+  roles:
+    - dgx_join

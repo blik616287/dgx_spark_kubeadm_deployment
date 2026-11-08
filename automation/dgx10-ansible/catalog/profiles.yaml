@@ -1,0 +1,60 @@
+---
+# ── Serving profiles ────────────────────────────────────────────────
+# A profile is a tested model set, not a wish list. `make plan` refuses a
+# profile that cannot fit; `make up PROFILE=…` runs it end to end.
+#
+# base    — names from catalog.base_models (served by the llm-serving chart)
+# extras  — any other catalog model, served by the chart or by dgx_engines
+# gateway — deploy the OpenAI-compatible gateway for this profile
+# bundle  — profile is intended for the air-gapped bundle path
+version: 1
+
+profiles:
+  minimal:
+    description: One coding model; the smallest useful endpoint.
+    base: [qwen3-coder-next]
+    extras: []
+    gateway: true
+
+  coding:
+    description: The chart's coder plus a general 14B for everyday work.
+    base: [qwen3-coder-next]
+    extras: [qwen3-14b]
+    gateway: true
+
+  reasoner:
+    description: A distilled reasoner and the 120B model when its headroom is acceptable.
+    base: [deepseek-r1-distill-32b]
+    extras: [gpt-oss-120b]
+    gateway: true
+
+  rag:
+    description: Small chat model, embeddings and a reranker; the GraphRAG building blocks.
+    base: []
+    extras: [qwen3-8b, qwen3-embedding-0.6b, bge-reranker-v2-m3]
+    gateway: true
+
+  agentic:
+    description: Two base models plus a fast tool-calling model for agent loops.
+    base: [qwen3-coder-next, deepseek-r1-distill-32b]
+    extras: [qwen3-14b]
+    gateway: true
+
+  vision:
+    description: Coder, a small VL model and Gemma 3 for heavier image work.
+    base: [qwen3-coder-next]
+    extras: [qwen2.5vl-7b, gemma3-27b]
+    gateway: true
+
+  full:
+    description: Both base models, a 14B, embeddings and a reranker; uses all five slices.
+    base: [qwen3-coder-next, deepseek-r1-distill-32b]
+    extras: [qwen3-14b, qwen3-embedding-0.6b, bge-reranker-v2-m3]
+    gateway: true
+
+  airgapped:
+    description: A small set sized for bundling images and weights onto removable media.
+    base: [qwen3-coder-next]
+    extras: [qwen3-8b]
+    gateway: true
+    bundle: true

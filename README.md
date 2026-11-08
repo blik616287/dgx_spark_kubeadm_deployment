@@ -32,6 +32,18 @@ ansible-playbook -i inventory.ini backup-models.yml --become \
   -e backup_schedule="0 3 * * *"
 ```
 
+## Optional Operator Layer
+
+`automation/dgx10-ansible/` is an optional Ansible framework that wraps this repository (pinned at `4a0c971`). It does not replace the playbooks above — it calls them — and adds the operator-facing layer:
+
+- a model catalog and fit planner that prices weights + KV cache against the 5 time-sliced GPU slots
+- per-model OpenAI-compatible verification, fixed report cards and a read-only `doctor`
+- an OpenAI-compatible gateway (LiteLLM) in front of every model, with optional TLS and key rotation
+- Prometheus/Grafana with a GPU dashboard, digest-pinned GitOps rendering, Argo CD, and helm upgrade/rollback
+- backup/restore, multi-node join/leave, policy enforcement, an offline bundle and CI
+
+It keeps its own inventory and variables, so the playbooks in this repository continue to work exactly as documented above. Run it from `automation/dgx10-ansible/`; its `README.md` is the authoritative guide.
+
 ## What Gets Installed
 
 **install-k8s.yml** sets up:

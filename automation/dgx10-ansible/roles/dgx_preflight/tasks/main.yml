@@ -1,0 +1,114 @@
+---
+# Gate the run on the things the upstream playbooks assume. Everything here is
+# a read or a warning except the ansible install, so a failed preflight costs a
+# few seconds rather than a half-installed cluster.
+
+- name: Confirm the target is a DGX Spark-class host
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture == 'aarch64' or dgx_allow_non_arm64 | bool
+    fail_msg: >-
+      Expected aarch64 (DGX Spark GB10) but found {{ ansible_architecture }}.
+      The NVIDIA runtime and the arm64 nodeSelector in the chart both assume
+      arm64. Pass -e dgx_allow_non_arm64=true only for a lab host.
+    quiet: true
+
+- name: Confirm the OS is Ubuntu
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == 'Ubuntu'
+    fail_msg: >-
+      The upstream playbooks install through apt; {{ ansible_distribution }} is
+      not supported.
+    quiet: true
+
+- name: Probe the NVIDIA driver
+  ansible.builtin.command: nvidia-smi -L
+  register: dgx_nvidia_smi
+  changed_when: false
+  failed_when: false
+
+- name: Require a working NVIDIA driver
+  ansible.builtin.assert:
+    that:
+      - dgx_nvidia_smi.rc == 0
+    fail_msg: >-
+      nvidia-smi failed (rc={{ dgx_nvidia_smi.rc }}). Install the DGX Spark
+      GPU driver before running install-k8s.yml.
+    quiet: true
+
+- name: Probe nvidia-ctk
+  ansible.builtin.command: nvidia-ctk --version
+  register: dgx_nvidia_ctk
+  changed_when: false
+  failed_when: false
+
+- name: Require nvidia-ctk
+  ansible.builtin.assert:
+    that:
+      - dgx_nvidia_ctk.rc == 0
+    fail_msg: >-
+      nvidia-ctk is missing. install-k8s.yml uses it to install the containerd
+      NVIDIA runtime.
+    quiet: true
+
+- name: Probe passwordless sudo
+  ansible.builtin.command: sudo -n true
+  register: dgx_sudo_check
+  changed_when: false
+  failed_when: false
+
+- name: Require passwordless sudo
+  ansible.builtin.assert:
+    that:
+      - dgx_sudo_check.rc == 0
+    fail_msg: >-
+      The wrapped playbooks invoke sudo non-interactively and cannot prompt
+      through this framework. Grant {{ ansible_env.USER }} NOPASSWD sudo, or
+      run the framework locally on the DGX with inventory/local.ini.
+    quiet: true
+
+- name: Measure free space on /
+  ansible.builtin.command: df -Pk /
+  register: dgx_df
+  changed_when: false
+
+- name: Warn when the disk cannot hold the model set
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: only
+      {{ (dgx_df.stdout_lines[1].split()[3] | int / 1048576) | round(1) }} GiB
+      free on /; dgx_min_free_gb is {{ dgx_min_free_gb }}. The default model set
+      needs roughly 100 GiB of PVCs before images.
+  when: (dgx_df.stdout_lines[1].split()[3] | int / 1048576) < dgx_min_free_gb
+
+- name: Probe ansible-playbook on the target
+  ansible.builtin.command: ansible-playbook --version
+  register: dgx_inner_ansible
+  changed_when: false
+  failed_when: false
+
+- name: Install ansible-playbook on the target
+  ansible.builtin.package:
+    name: "{{ dgx_ansible_package }}"
+    state: present
+  become: true
+  when:
+    - dgx_inner_ansible.rc != 0
+    - dgx_install_ansible | bool
+
+- name: Re-probe ansible-playbook
+  ansible.builtin.command: ansible-playbook --version
+  register: dgx_inner_ansible_after
+  changed_when: false
+  failed_when: false
+  when: dgx_inner_ansible.rc != 0
+
+- name: Require ansible-playbook on the target
+  ansible.builtin.assert:
+    that:
+      - dgx_inner_ansible.rc == 0 or dgx_inner_ansible_after.rc == 0
+    fail_msg: >-
+      ansible-playbook is required on the target so the repo's playbooks run
+      from their own directory (they resolve charts with playbook_dir).
+    quiet: true

@@ -1,0 +1,389 @@
+---
+# ── Transport ────────────────────────────────────────────────────────
+# scripts/tunnel.sh puts dgx10's SSH on 127.0.0.1:{{ dgx_ssh_port }}.
+# host_vars/dgx10.yml (beside this file) maps these onto Ansible's connection
+# variables, so `-e dgx_ssh_host=... -e dgx_ssh_port=... -e dgx_ssh_user=...`
+# overrides them.
+dgx_ssh_host: "127.0.0.1"
+dgx_ssh_port: 2222
+dgx_ssh_user: "ubuntu"
+dgx_ssh_key: "~/.ssh/id_rsa"
+
+# ── Upstream repository (the source of truth for the deployment) ─────
+dgx_repo_url: "https://github.com/blik616287/dgx_spark_kubeadm_deployment.git"
+dgx_repo_ref: "4a0c97129da8a61f65ff9009bd63689fc12b70a1"
+dgx_repo_dir: "{{ ansible_env.HOME }}/dgx-spark"
+dgx_repo_force: true          # the checkout is managed; local edits are discarded
+
+# ── Playbooks inside the checkout ────────────────────────────────────
+dgx_inner_inventory: "inventory.ini"
+dgx_k8s_playbook: "install-k8s.yml"
+dgx_download_playbook: "download-models.yml"
+dgx_deploy_playbook: "deploy-models.yml"
+dgx_graphrag_playbook: "deploy-graphrag.yml"
+dgx_teardown_playbooks:
+  - "remove-graphrag.yml"
+  - "remove-models.yml"
+  - "remove-k8s.yml"
+
+# ── Identity the inner playbooks use for kubeconfig / kubectl ────────
+# The inner playbooks default to SUDO_USER or 'b'; passing these explicitly
+# avoids a silent wrong-home when the SSH user is not the sudo user.
+dgx_local_user: "{{ ansible_env.USER | default(ansible_user | default('ubuntu')) }}"
+dgx_kubeconfig: "{{ ansible_env.HOME }}/.kube/config"
+
+# ── Target prerequisites ─────────────────────────────────────────────
+dgx_install_ansible: true
+dgx_ansible_package: "ansible"
+dgx_allow_non_arm64: false    # DGX Spark is aarch64; only relax for a lab host
+dgx_min_free_gb: 100
+
+# ── Model selection ──────────────────────────────────────────────────
+# Base pair from the pinned chart. `dgx_models_enabled`:
+#   null (default) → leave the chart defaults (both enabled)
+#   []             → disable both, e.g. to serve only dgx_extra_models
+#   non-empty list → enable exactly these base models, disable the rest
+dgx_models_enabled: null
+dgx_base_models:
+  - "qwen3-coder-next"
+  - "deepseek-r1-distill-32b"
+
+# ── Multi-model deployment ───────────────────────────────────────────
+# Extra Ollama models served beside the base pair. Each entry is merged into
+# charts/llm-serving's .Values.models, and its weights are pulled into the
+# Longhorn PVC the chart mounts before Helm starts the pod.
+#
+# Required: name, enabled, source (ollama), tag.
+# Optional: displayName, size (20Gi), storageClass (longhorn-models),
+#           image (ollama/ollama:latest), port (11434), numCtx ("32768"),
+#           numParallel ("1"), resources (dgx_default_model_resources),
+#           nodePort (expose a NodePort service), chart_values (extra map
+#           merged into the chart entry, e.g. toolsAlias).
+#
+# Example:
+#   dgx_extra_models:
+#     - name: qwen3-14b
+#       enabled: true
+#       source: ollama
+#       tag: "qwen3:14b"
+#       size: 20Gi
+#       numCtx: "32768"
+dgx_extra_models: []
+
+dgx_default_model_resources:
+  requests:
+    cpu: "4"
+    memory: 1Gi
+  limits:
+    cpu: "10"
+    memory: 120Gi
+    nvidia.com/gpu: "1"
+
+dgx_models_namespace: "llm-serving"
+dgx_helm_release: "llm-serving"
+dgx_kserve: true              # matches the chart's default deployment mode
+
+# install-k8s.yml grants 5 time-sliced GPU replicas per physical GPU. Every
+# served model requests one, so this is the ceiling on concurrent models.
+dgx_max_gpu_pods: 5
+dgx_pull_timeout: 3600        # seconds; pulling a large model can take an hour
+dgx_model_probe_image: "busybox:latest"
+dgx_ollama_image: "ollama/ollama:latest"
+dgx_values_file: "{{ ansible_env.HOME }}/.dgx10-ansible/models-values.yml"
+
+# What the framework believes is actually served: base selection + enabled
+# extras. Derived, not set by hand.
+dgx_served_models: >-
+  {{ (dgx_base_models if dgx_models_enabled is none else dgx_models_enabled)
+     + (dgx_extra_models | selectattr('enabled', 'equalto', true)
+        | map(attribute='name') | list) }}
+
+dgx_chart_dir: "{{ dgx_repo_dir }}/charts/llm-serving"
+dgx_helm_timeout: "20m"
+
+# Extra `--set` values applied after the merged values file, for chart knobs
+# that are not per-model, e.g. ["nodeSelector.kubernetes.io/arch=arm64"].
+dgx_chart_extra_sets: []
+
+# ── Verification ─────────────────────────────────────────────────────
+# Empty → smoke-test the first served model, so the verifier never points at
+# a model that `dgx_models_enabled` or the extra catalog switched off.
+dgx_smoke_model: ""
+dgx_smoke_prompt: "Reply with exactly: DGX10-OK"
+dgx_show_playbook_output: false
+
+# ── Catalog, profiles and fit planning ───────────────────────────────
+# catalog/models.yaml describes what fits: weights, KV cache, context and
+# capabilities. catalog/profiles.yaml holds named selections that have already
+# been planned against the 120 GiB usable budget.
+#
+# When dgx_profile or dgx_catalog_models is set, the dgx_catalog role resolves
+# the selection and overwrites dgx_models_enabled, dgx_extra_models,
+# dgx_engine_models and dgx_served_models for the run. With both empty the
+# hand-written selection above stays in charge, so `make models MODELS=...`
+# behaves exactly as before.
+dgx_profile: ""
+dgx_catalog_models: []
+
+dgx_framework_dir: "{{ playbook_dir }}/.."
+dgx_plan_script: "{{ dgx_framework_dir }}/lib/dgxcatalog.py"
+dgx_catalog_json: "{{ dgx_framework_dir }}/catalog/models.yaml"
+dgx_plan_allow_fail: false    # true → print a FAIL verdict instead of stopping
+
+# The set the planner checks when no profile or explicit list is given.
+dgx_active_models: >-
+  {{ dgx_catalog_models if dgx_catalog_models | length > 0
+     else ((dgx_models_enabled if dgx_models_enabled is not none else dgx_base_models)
+           + (dgx_extra_models | selectattr('enabled', 'equalto', true)
+              | map(attribute='name') | list)) }}
+
+# One expression so the planner is invoked identically by every role.
+dgx_plan_selection: >-
+  {{ (['--profile', dgx_profile] if (dgx_profile | length > 0)
+      else (['--current'] + (dgx_catalog_models if dgx_catalog_models | length > 0
+                             else dgx_active_models))) }}
+
+# ── Outputs ─────────────────────────────────────────────────────────
+# Reports and recipes are written on the controller, never inside the repo.
+dgx_output_dir: "{{ dgx_framework_dir }}/reports"
+dgx_report_dir: "{{ dgx_output_dir }}"
+dgx_report_stamp: "{{ ansible_date_time.iso8601_basic_short }}"
+dgx_remote_state_dir: "{{ ansible_env.HOME }}/.dgx10-ansible"
+
+# ── Verification and functional probes ──────────────────────────────
+# `ollama list` proves a manifest exists; the probe proves the model answers.
+# Tool calling and structured output are soft unless asked to be strict.
+dgx_verify_probe: true
+dgx_verify_probe_timeout: 300
+dgx_verify_long_context: false
+dgx_verify_structured: true
+dgx_verify_strict_tools: false
+dgx_verify_strict_structured: false
+dgx_verify_allow_fail: false
+# Interpreter on the target used to run lib/dgxprobe.py and lib/dgxeval.py.
+# The probe runs on the host (it shells out to kubectl exec), not in the pod.
+dgx_probe_python: "python3"
+# Requests sent before the measured one, so the report separates cold-load
+# latency from steady-state latency. Ollama is also pinned with keep_alive=-1
+# so the weights are not evicted between probes.
+dgx_verify_warmup: 2
+dgx_ollama_keep_alive: "-1"
+# A node that is NotReady means a joined worker is broken; fail instead of
+# reporting the node list as if it were healthy.
+dgx_verify_require_ready_nodes: true
+
+# ── Doctor ──────────────────────────────────────────────────────────
+dgx_doctor_allow_errors: false
+
+# ── Acceptance run ──────────────────────────────────────────────────
+# `make acceptance` runs verify, doctor and eval without stopping at the first
+# failure, then decides once. These are the storage classes the cluster is
+# expected to provide; a missing one fails the run.
+dgx_acceptance_storage_classes:
+  - longhorn
+  - longhorn-models
+dgx_acceptance_allow_fail: false
+
+# ── Gateway (LiteLLM) ───────────────────────────────────────────────
+# One OpenAI-compatible endpoint in front of every served model. The master
+# key is read from the environment and never written to the repo; the role
+# fails closed when it is absent.
+dgx_gateway_enabled: true
+dgx_gateway_namespace: "dgx-gateway"
+dgx_gateway_image: "ghcr.io/berriai/litellm:main-stable"
+dgx_gateway_port: 4000
+dgx_gateway_node_port: 0          # 0 → ClusterIP only
+dgx_gateway_master_key: "{{ lookup('env', 'DGX_GATEWAY_MASTER_KEY') | default('', true) }}"
+dgx_gateway_client_dir: "{{ dgx_output_dir }}/clients"
+dgx_gateway_rollout_timeout: "10m"
+# Address clients should use for the gateway. Empty → the Ansible host, which
+# over the zrok tunnel is 127.0.0.1 and correct only for port-forwarding.
+dgx_gateway_hostname: ""
+# TLS terminates at an Ingress in front of the gateway. Needs an ingress
+# controller and cert-manager; the role refuses to render the Ingress without
+# a host and a ClusterIssuer.
+dgx_gateway_tls: false
+dgx_gateway_ingress_class: "nginx"
+dgx_gateway_cluster_issuer: "letsencrypt-prod"
+dgx_gateway_host: ""
+dgx_gateway_tls_secret: "litellm-tls"
+# `make gateway-rotate` replaces the master key, patches the Secret and
+# restarts the gateway. Empty dgx_gateway_new_key → a 32-character key is
+# generated and written to dgx_gateway_key_file (0600, outside the repo).
+dgx_gateway_rotate: false
+dgx_gateway_new_key: ""
+dgx_gateway_key_file: "{{ dgx_report_dir }}/.gateway-master-key"
+
+# ── One-command bring-up ────────────────────────────────────────────
+# `make up` probes the cluster and skips install-k8s.yml when a Ready node
+# exists. Set this true to rebuild the cluster anyway.
+dgx_up_force_cluster_install: false
+
+# ── Add one model ───────────────────────────────────────────────────
+dgx_model_add: ""
+
+# ── Observability ───────────────────────────────────────────────────
+dgx_observability_enabled: true
+dgx_observability_namespace: "monitoring"
+dgx_observability_release: "kube-prometheus-stack"
+dgx_observability_chart: "prometheus-community/kube-prometheus-stack"
+dgx_observability_repo: "https://prometheus-community.github.io/helm-charts"
+dgx_observability_retention: "7d"
+dgx_observability_timeout: "15m"
+dgx_observability_show_password: false
+# Empty → a 24-character password is generated once into
+# reports/.grafana-password (mode 0600) and reused on later runs.
+dgx_observability_grafana_password: "{{ lookup('env', 'DGX_GRAFANA_PASSWORD') | default('', true) }}"
+# The DCGM exporter is discovered at runtime (its namespace, service and port
+# name differ between GPU Operator releases). Pin these only to override the
+# discovery. require_gpu makes a missing exporter fail the run instead of
+# leaving the dashboard blank.
+dgx_observability_dcgm_namespace: ""
+dgx_observability_dcgm_service: ""
+dgx_observability_dcgm_port: ""
+dgx_observability_scrape_interval: "15s"
+dgx_observability_require_gpu: false
+
+# ── Longhorn snapshot / backup ──────────────────────────────────────
+# Snapshot is on-cluster and cheap. Backup additionally needs a configured
+# Longhorn backup target (the doctor warns when it is unset).
+dgx_backup_action: "snapshot"     # snapshot | backup
+dgx_backup_pvcs: []               # empty → ollama-<served model>
+dgx_backup_name: "dgx10-{{ ansible_date_time.iso8601_basic_short }}"
+dgx_backup_wait: true
+# A cron expression creates a Longhorn RecurringJob so snapshots (or backups)
+# happen without a playbook run. Empty → manual only.
+dgx_backup_schedule: ""
+dgx_backup_schedule_type: "snapshot"   # snapshot | backup
+dgx_backup_retain: 5
+dgx_backup_recurring_name: "dgx10-model-volumes"
+dgx_backup_group: "dgx10-models"
+
+# ── Restore ─────────────────────────────────────────────────────────
+# Restores a Longhorn snapshot or backup into a NEW volume and PVC. The source
+# PVC is never modified, so a restore can always be re-run or discarded.
+dgx_restore_name: ""              # make restore NAME=<snapshot-or-backup>
+dgx_restore_kind: "auto"          # auto | snapshot | backup
+dgx_restore_pvc: ""               # empty → <source-pvc>-restored-<stamp>
+dgx_restore_size: ""              # empty → the source PVC's request
+dgx_restore_access_modes: ["ReadWriteOnce"]
+dgx_restore_storage_class: "longhorn-models"
+dgx_restore_wait: true
+dgx_restore_timeout: "30m"
+
+# ── Non-Ollama engines (vLLM, llama.cpp, SGLang) ────────────────────
+dgx_engines_enabled: true
+dgx_engines_rollout_timeout: "30m"
+# offline=true omits the weight-fetch init container; the weights must already
+# be on the engine's PVC (the offline bundle carries them).
+dgx_engines_offline: false
+# Refuse to schedule an image that publishes no linux/arm64 manifest. This
+# asks the registry, so it needs egress; set false for an air-gapped controller.
+dgx_engines_check_arch: true
+dgx_engines_arch: "arm64"
+
+# ── Offline bundle ──────────────────────────────────────────────────
+dgx_bundle_action: "create"       # create | verify | load
+dgx_bundle_dir: "{{ ansible_env.HOME }}/dgx10-bundle"
+dgx_bundle_images: >-
+  ollama/ollama:latest busybox:latest python:3.12-slim
+  vllm/vllm-openai:latest ghcr.io/berriai/litellm:main-stable
+dgx_bundle_charts: "{{ dgx_chart_dir }}"
+dgx_bundle_pvcs: ""
+
+# ── Quantization (experimental) ─────────────────────────────────────
+# Opt-in twice: the flag below must be true and the model must be named.
+dgx_quantize_confirm: false
+dgx_quantize_model: ""
+dgx_quantize_pvc: ""
+dgx_quantize_outtype: "q4_k_m"
+dgx_quantize_image: "ghcr.io/ggerganov/llama.cpp:full"
+dgx_quantize_namespace: "{{ dgx_models_namespace }}"
+dgx_quantize_timeout: "4h"
+dgx_quantize_deadline: 14400      # activeDeadlineSeconds on the Job
+dgx_quantize_memory_gib: 60       # memory limit for the convert/quantise container
+dgx_quantize_check_arch: true     # ask the registry for a linux/arm64 manifest
+
+# ── Multi-node join ─────────────────────────────────────────────────
+# Add every node to the dgx group; the first one is the control plane and the
+# rest are joined. `make join` skips a host that already has kubelet.conf.
+dgx_join_group: "dgx"
+dgx_control_plane: "{{ groups['dgx'][0] }}"
+# `make leave` is destructive: it drains, resets and deletes the node. It
+# refuses to run without the confirmation.
+dgx_leave_confirm: false
+dgx_leave_drain: true
+dgx_leave_timeout: "300s"
+dgx_leave_node_name: ""           # empty → inventory_hostname
+
+# ── Security ────────────────────────────────────────────────────────
+# Default-deny ingress is applied only to the namespaces that hold the model
+# and gateway pods. kserve is left alone: the API server and the webhooks must
+# reach it, and a blanket deny breaks admission. monitoring is left alone so
+# Prometheus can scrape its own exporters.
+dgx_security_enabled: true
+dgx_security_allow_namespaces:
+  - "{{ dgx_models_namespace }}"
+  - "{{ dgx_gateway_namespace }}"
+dgx_security_allow_egress_443: true   # false only for an air-gapped site
+dgx_security_require_enforcement: false  # fail when the CNI cannot enforce
+# Flannel ignores NetworkPolicy. Set this true to install Calico in
+# policy-only mode beside Flannel, which makes the policies effective without
+# replacing the CNI. It needs egress to fetch the pinned manifest.
+dgx_security_install_policy_engine: false
+dgx_security_calico_version: "v3.29.3"
+dgx_security_calico_manifest: >-
+  https://raw.githubusercontent.com/projectcalico/calico/{{ dgx_security_calico_version }}/manifests/calico-policy-only.yaml
+# An enforcing CNI (Calico) evaluates kubelet health checks against pod
+# ingress policy. Add the node CIDR here when readiness probes start failing
+# after `make security`.
+dgx_security_probe_cidrs: []
+
+# ── GitOps ──────────────────────────────────────────────────────────
+dgx_gitops_dir: "{{ dgx_output_dir }}/gitops"
+dgx_gitops_repo_url: "https://github.com/blik616287/dgx_spark_kubeadm_deployment"
+dgx_gitops_revision: "{{ dgx_repo_ref }}"
+dgx_gitops_apply_enabled: false   # Argo CD is not installed by this framework
+# Resolve every image to repo@sha256 in the rendered tree. Needs registry
+# egress; the result is what makes a redeploy reproducible.
+dgx_gitops_pin_digests: false
+dgx_gitops_offline: false
+
+# ── Argo CD ─────────────────────────────────────────────────────────
+dgx_argocd_enabled: true
+dgx_argocd_namespace: "argocd"
+dgx_argocd_version: "v2.13.3"
+dgx_argocd_manifest_url: >-
+  https://raw.githubusercontent.com/argoproj/argo-cd/{{ dgx_argocd_version }}/manifests/install.yaml
+dgx_argocd_manifest_local: ""    # set for an air-gapped install
+dgx_argocd_wait_timeout: 600
+dgx_argocd_apply_app: true
+dgx_argocd_app_name: "llm-serving"
+
+# ── Upgrade and rollback ────────────────────────────────────────────
+# `make upgrade` runs helm upgrade --wait; on failure it rolls back to the
+# revision that was serving. REVISION= pins the chart's --revision.
+dgx_upgrade_helm_timeout: "20m"
+dgx_upgrade_wait: true
+dgx_upgrade_revision: ""
+dgx_upgrade_rollback_on_failure: true
+dgx_upgrade_set: []
+
+# ── Evaluation report card ──────────────────────────────────────────
+# A fixed, small suite per chat model. Scores below the floor fail the play
+# unless dgx_eval_allow_fail is true.
+dgx_eval_enabled: true
+dgx_eval_timeout: 180
+dgx_eval_min_score: 0.8
+dgx_eval_allow_fail: false
+dgx_eval_models_file: "{{ dgx_remote_state_dir }}/eval-models.json"
+
+# ── Power and cost ──────────────────────────────────────────────────
+dgx_power_report: "{{ dgx_report_dir }}/verify-latest.json"
+dgx_power_watts: 0                # 0 → sample nvidia-smi on the target
+dgx_power_idle_watts: 0
+dgx_power_samples: 10             # readings averaged for the cost row
+dgx_power_sample_interval_ms: 1000
+dgx_power_sample: false           # make power-sample: record raw samples only
+dgx_usd_per_kwh: 0.30
+

@@ -1,0 +1,531 @@
+---
+# Multi-model deployment.
+#
+# The chart already renders one PVC and one InferenceService per entry in
+# .Values.models whose `enabled` is true, so multi-model support is two things:
+#   1. pull each extra model's weights into the PVC the chart will mount, and
+#   2. hand Helm a values map containing base + extras with `enabled` resolved.
+#
+# The base entries are read out of the chart's own values.yaml rather than
+# copied here. Copying them would let this framework silently diverge from the
+# chart at a bumped dgx_repo_ref; reading them keeps one source of truth.
+
+- name: Validate the extra-model catalog
+  block:
+    - name: Reject a string-form model selection
+      ansible.builtin.assert:
+        that:
+          - dgx_models_enabled is none or dgx_models_enabled is not string
+        fail_msg: >-
+          dgx_models_enabled parsed as a string. Ansible does not coerce
+          `-e key=[a]`; pass JSON: -e '{"dgx_models_enabled": ["a"]}', or use
+          `make models MODELS='["a"]'`.
+        quiet: true
+
+    - name: Each extra model must declare the fields the chart needs
+      ansible.builtin.assert:
+        that:
+          - item.name is defined and item.name | length > 0
+          - item.name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+          - item.enabled is defined and item.enabled is boolean
+          - item.tag is defined and item.tag | length > 0
+          - item.source | default('ollama') == 'ollama'
+        fail_msg: >-
+          dgx_extra_models entry
+          {{ item.name | default('<unnamed>') }} is invalid. name (DNS-1123),
+          boolean enabled and tag are required, and source must be "ollama":
+          the llm-serving chart only serves Ollama models (HuggingFace models
+          belong to the GraphRAG stack, not this chart).
+        quiet: true
+      loop: "{{ dgx_extra_models }}"
+      loop_control:
+        label: "{{ item.name | default('<unnamed>') }}"
+
+    - name: Extra-model names must be unique and must not shadow a base model
+      ansible.builtin.assert:
+        that:
+          - dgx_extra_models | map(attribute='name') | unique | list | length == dgx_extra_models | length
+          - dgx_extra_models | map(attribute='name') | intersect(dgx_base_models) | length == 0
+        fail_msg: >-
+          Extra-model names must be unique and must not collide with
+          dgx_base_models ({{ dgx_base_models | join(', ') }}).
+        quiet: true
+
+    - name: Requested base models must exist in the chart
+      ansible.builtin.assert:
+        that:
+          - dgx_models_enabled is none or
+            dgx_models_enabled | difference(dgx_base_models) | length == 0
+        fail_msg: >-
+          Unknown base model(s)
+          {{ (dgx_models_enabled | default([])) | difference(dgx_base_models) }}.
+          Use dgx_base_models for the chart's models and dgx_extra_models for
+          anything else.
+        quiet: true
+
+    - name: At least one model must be served
+      ansible.builtin.assert:
+        that:
+          - dgx_served_models | length > 0
+        fail_msg: >-
+          Nothing would be served: the base set and dgx_extra_models are both
+          empty. Enable at least one model.
+        quiet: true
+
+- name: Keep the served set within the GPU time-slicing budget
+  ansible.builtin.assert:
+    that:
+      - dgx_served_models | length <= dgx_max_gpu_pods | int
+    fail_msg: >-
+      {{ dgx_served_models | length }} models are enabled
+      ({{ dgx_served_models | join(', ') }}) but install-k8s.yml grants
+      {{ dgx_max_gpu_pods }} time-sliced GPU replicas. Disable a model or raise
+      the time-slicing count in the upstream install.
+    quiet: true
+
+- name: Stat the chart's values file
+  ansible.builtin.stat:
+    path: "{{ dgx_chart_dir }}/values.yaml"
+  register: dgx_chart_values_file
+
+- name: Require the pinned chart
+  ansible.builtin.assert:
+    that:
+      - dgx_chart_values_file.stat.exists
+    fail_msg: >-
+      {{ dgx_chart_dir }}/values.yaml is missing. Run `make bootstrap` so the
+      pinned checkout exists before deploying models.
+    quiet: true
+
+- name: Require KServe when the chart renders InferenceServices
+  when: dgx_kserve | bool
+  block:
+    - name: Probe the KServe CRD
+      ansible.builtin.command: kubectl get crd inferenceservices.serving.kserve.io
+      environment:
+        KUBECONFIG: "{{ dgx_kubeconfig }}"
+      register: dgx_kserve_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with a clear message when KServe is absent
+      ansible.builtin.assert:
+        that:
+          - dgx_kserve_crd.rc == 0
+        fail_msg: >-
+          The InferenceService CRD is not installed. Run `make models` (which
+          runs deploy-models.yml first) rather than `make multimodel` on a
+          cluster that has never had KServe.
+        quiet: true
+
+- name: Ensure the models namespace exists
+  ansible.builtin.command: kubectl get namespace {{ dgx_models_namespace }}
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_models_ns
+  changed_when: false
+  failed_when: false
+
+- name: Create the models namespace
+  ansible.builtin.command: kubectl create namespace {{ dgx_models_namespace }}
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  when: dgx_models_ns.rc != 0
+  changed_when: true
+
+- name: Select the enabled extra models
+  ansible.builtin.set_fact:
+    dgx_enabled_extras: >-
+      {{ dgx_extra_models | selectattr('enabled', 'equalto', true) | list }}
+
+# ── Pull extra weights into the PVCs the chart will mount ────────────
+# The PVC names, mount path and layout mirror what charts/llm-serving and
+# download-models.yml use, so the chart adopts these PVCs instead of
+# provisioning empty ones.
+
+- name: Create PVCs for the extra models
+  ansible.builtin.command:
+    cmd: kubectl apply -f -
+    stdin: "{{ dgx_extra_pvc | to_nice_yaml(indent=2) }}"
+  vars:
+    dgx_extra_pvc:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "ollama-{{ item.name }}"
+        namespace: "{{ dgx_models_namespace }}"
+        labels:
+          app: "{{ item.name }}"
+          app.kubernetes.io/managed-by: Helm
+        annotations:
+          meta.helm.sh/release-name: "{{ dgx_helm_release }}"
+          meta.helm.sh/release-namespace: "{{ dgx_models_namespace }}"
+          helm.sh/resource-policy: keep
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "{{ item.storageClass | default('longhorn-models') }}"
+        resources:
+          requests:
+            storage: "{{ item.size | default('20Gi') }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_enabled_extras }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_extra_pvc_apply
+  changed_when: "'created' in dgx_extra_pvc_apply.stdout"
+
+- name: Wait for the extra-model PVCs to bind
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - wait
+      - "--for=jsonpath={.status.phase}=Bound"
+      - "pvc/ollama-{{ item.name }}"
+      - --timeout=180s
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_enabled_extras }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Delete stale probe pods from a previous run
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - delete
+      - pod
+      - "{{ item.1 }}-{{ item.0 }}"
+      - --ignore-not-found
+      - --grace-period=0
+      - --force
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: >-
+    {{ dgx_enabled_extras | map(attribute='name')
+       | product(['check', 'ollama-pull', 'verify']) | list }}
+  loop_control:
+    label: "{{ item.1 }}-{{ item.0 }}"
+  changed_when: false
+  failed_when: false
+
+- name: Check whether each extra model is already in its PVC
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - run
+      - "check-{{ item.name }}"
+      - --rm
+      - -i
+      - --restart=Never
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - "--image={{ dgx_model_probe_image }}"
+      - "--overrides={{ dgx_check_overrides | to_json }}"
+  vars:
+    dgx_check_overrides:
+      spec:
+        volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: "ollama-{{ item.name }}"
+        containers:
+          - name: check
+            image: "{{ dgx_model_probe_image }}"
+            command:
+              - sh
+              - -c
+              - >-
+                if find /data/manifests -type f 2>/dev/null | grep -q .; then
+                partials=$(find /data/blobs -name '*-partial*' 2>/dev/null | wc -l);
+                if [ "$partials" -gt 0 ]; then echo incomplete; else echo ok; fi;
+                else echo missing; fi
+            volumeMounts:
+              - name: data
+                mountPath: /data
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_enabled_extras }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_model_check
+  changed_when: false
+  failed_when: false
+  timeout: 180
+
+- name: Pull missing or incomplete extra models into their PVCs
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - run
+      - "ollama-pull-{{ item.item.name }}"
+      - --rm
+      - -i
+      - --restart=Never
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - "--image={{ dgx_ollama_image }}"
+      - "--overrides={{ dgx_pull_overrides | to_json }}"
+  vars:
+    dgx_pull_overrides:
+      spec:
+        volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: "ollama-{{ item.item.name }}"
+        containers:
+          - name: pull
+            image: "{{ dgx_ollama_image }}"
+            env:
+              - name: OLLAMA_MODELS
+                value: /root/.ollama
+            command:
+              - sh
+              - -c
+              - >-
+                ollama serve & sleep 5 && ollama pull
+                {{ item.item.tag }} && echo PULL_COMPLETE
+            volumeMounts:
+              - name: data
+                mountPath: /root/.ollama
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_model_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: (item.stdout | default('') | trim) != 'ok'
+  register: dgx_model_pull
+  changed_when: "'PULL_COMPLETE' in (dgx_model_pull.stdout | default(''))"
+  timeout: "{{ dgx_pull_timeout | int }}"
+
+- name: Verify the checksums of the pulled Ollama blobs
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - run
+      - "verify-{{ item.name }}"
+      - --rm
+      - -i
+      - --restart=Never
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - "--image={{ dgx_model_probe_image }}"
+      - "--overrides={{ dgx_verify_overrides | to_json }}"
+  vars:
+    dgx_verify_overrides:
+      spec:
+        volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: "ollama-{{ item.name }}"
+        containers:
+          - name: verify
+            image: "{{ dgx_model_probe_image }}"
+            command:
+              - sh
+              - -c
+              - >-
+                manifest=$(find /data/manifests -type f 2>/dev/null | head -1);
+                if [ -z "$manifest" ]; then echo SKIP; exit 0; fi;
+                failed=0;
+                for digest in $(grep -oE 'sha256:[a-f0-9]+' "$manifest"); do
+                blob=/data/blobs/$(echo "$digest" | tr : -);
+                expected=$(echo "$digest" | cut -d: -f2);
+                if [ ! -f "$blob" ]; then
+                echo "FAIL:missing:$digest"; failed=1; continue; fi;
+                actual=$(sha256sum "$blob" | cut -d' ' -f1);
+                size=$(du -h "$blob" | cut -f1);
+                if [ "$actual" = "$expected" ]; then
+                echo "PASS:$size:$digest";
+                else echo "FAIL:$size:$digest"; failed=1; fi; done;
+                exit $failed
+            volumeMounts:
+              - name: data
+                mountPath: /data
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_enabled_extras }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_model_verify
+  changed_when: false
+  failed_when: false
+  timeout: 600
+
+- name: Fail if any extra model failed verification
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+      - "'FAIL' not in item.stdout"
+    fail_msg: >-
+      {{ item.item.name }} failed checksum verification:
+      {{ item.stdout | default('') }} {{ item.stderr | default('') }}
+    quiet: true
+  loop: "{{ dgx_model_verify.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Show the extra-model verification results
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }}: {{ item.stdout_lines | default([]) }}"
+  loop: "{{ dgx_model_verify.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+# ── Render the full model map and apply it ──────────────────────────
+
+- name: Read the chart's own values.yaml
+  ansible.builtin.slurp:
+    src: "{{ dgx_chart_dir }}/values.yaml"
+  register: dgx_chart_values_raw
+
+- name: Seed the merged model map from the chart defaults
+  ansible.builtin.set_fact:
+    dgx_merged_models: >-
+      {{ (dgx_chart_values_raw.content | b64decode | from_yaml).models }}
+
+- name: Apply the base-model enable flags
+  ansible.builtin.set_fact:
+    dgx_merged_models: >-
+      {{ dgx_merged_models | combine(
+           {item: {'enabled': item in dgx_models_enabled}}, recursive=True) }}
+  loop: "{{ dgx_base_models }}"
+  when: dgx_models_enabled is not none
+
+- name: Add each enabled extra model to the chart's model map
+  ansible.builtin.set_fact:
+    dgx_merged_models: >-
+      {{ dgx_merged_models | combine({item.name: dgx_extra_chart_entry},
+                                      recursive=True) }}
+  vars:
+    dgx_extra_chart_entry: >-
+      {{ {
+        'enabled': true,
+        'image': item.image | default(dgx_ollama_image),
+        'ollamaPull': item.tag,
+        'displayName': item.displayName | default(item.name),
+        'port': item.port | default(11434),
+        'numCtx': item.numCtx | default('32768'),
+        'numParallel': item.numParallel | default('1'),
+        'resources': item.resources | default(dgx_default_model_resources),
+        'persistence': {
+          'storageClass': item.storageClass | default('longhorn-models'),
+          'size': item.size | default('20Gi')
+        }
+      } | combine(item.chart_values | default({}), recursive=True) }}
+  loop: "{{ dgx_enabled_extras }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure the values-file directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_values_file | dirname }}"
+    state: directory
+    mode: "0700"
+
+- name: Render the merged values file
+  ansible.builtin.copy:
+    dest: "{{ dgx_values_file }}"
+    mode: "0600"
+    content: "{{ {'models': dgx_merged_models} | to_nice_yaml(indent=2) }}"
+
+# Helm deletes a PVC when `enabled` flips to false and the template stops
+# rendering it. The weights are expensive; keep the PVC (and the weights) so
+# re-enabling a model does not re-download it. This must run before the helm
+# pass that turns a model off.
+- name: Keep model PVCs across changes to the served set
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ dgx_models_namespace }}"
+      - annotate
+      - "pvc/ollama-{{ item }}"
+      - "helm.sh/resource-policy=keep"
+      - --overwrite
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: >-
+    {{ dgx_base_models + (dgx_extra_models | map(attribute='name') | list) }}
+  loop_control:
+    label: "{{ item }}"
+  register: dgx_pvc_keep
+  changed_when: "'annotated' in (dgx_pvc_keep.stdout | default(''))"
+  failed_when: false
+
+- name: Apply the merged model set
+  ansible.builtin.shell: |
+    set -euo pipefail
+    args=(helm upgrade --install {{ dgx_helm_release }} "{{ dgx_chart_dir }}"
+          --namespace {{ dgx_models_namespace }} --create-namespace
+          --values "{{ dgx_values_file }}"
+          --wait --timeout {{ dgx_helm_timeout }})
+    {% for s in dgx_chart_extra_sets %}
+    args+=(--set "{{ s }}")
+    {% endfor %}
+    "${args[@]}"
+  args:
+    executable: /bin/bash
+    chdir: "{{ dgx_repo_dir }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_merged_apply
+  changed_when: true
+
+- name: Fail with the helm output
+  ansible.builtin.fail:
+    msg: |
+      Applying the merged model set failed (rc={{ dgx_merged_apply.rc }}).
+      --- stdout ---
+      {{ dgx_merged_apply.stdout }}
+      --- stderr ---
+      {{ dgx_merged_apply.stderr }}
+  when: dgx_merged_apply.rc != 0
+
+# ── Optional external endpoints ─────────────────────────────────────
+
+- name: Expose extra models that asked for a NodePort
+  ansible.builtin.command:
+    cmd: kubectl apply -f -
+    stdin: "{{ dgx_extra_service | to_nice_yaml(indent=2) }}"
+  vars:
+    # Built as one expression (not a YAML mapping with templated scalars) so
+    # nodePort/targetPort stay integers in the rendered document.
+    dgx_extra_service: >-
+      {{ {'apiVersion': 'v1', 'kind': 'Service',
+          'metadata': {'name': item.name ~ '-nodeport',
+                       'namespace': dgx_models_namespace},
+          'spec': {
+            'type': 'NodePort',
+            'selector': item.selector | default(
+              {'serving.kserve.io/inferenceservice': item.name}
+              if dgx_kserve | bool else {'app': item.name}),
+            'ports': [{'port': 80,
+                       'targetPort': item.port | default(11434) | int,
+                       'nodePort': item.nodePort | int,
+                       'name': 'http'}]}} }}
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: >-
+    {{ dgx_enabled_extras | selectattr('nodePort', 'defined') | list }}
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_extra_service_apply
+  changed_when: "'created' in dgx_extra_service_apply.stdout"
+
+- name: Report the served model set
+  ansible.builtin.debug:
+    msg:
+      served: "{{ dgx_served_models }}"
+      extras: "{{ dgx_enabled_extras | map(attribute='name') | list }}"
+      values_file: "{{ dgx_values_file }}"
+      endpoints: >-
+        {{ dgx_served_models | map('regex_replace', '^(.+)$',
+           ('http://\\1-predictor.' ~ dgx_models_namespace ~ '.svc.cluster.local:80'))
+           | list }}

@@ -1,0 +1,116 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dgx-quantize
+  namespace: {{ dgx_quantize_namespace }}
+  labels:
+    dgx10/action: quantize
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ dgx_quantize_deadline | default(14400) }}
+  template:
+    metadata:
+      labels:
+        dgx10/action: quantize
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      initContainers:
+        - name: fetch
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              pip install --quiet huggingface_hub
+              python3 - <<'PY'
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  "{{ dgx_quantize_model }}",
+                  local_dir="/work/source",
+                  # Keep the safetensors index: it names the shards the
+                  # converter must concatenate. Dropping it produced a
+                  # silently truncated model.
+                  ignore_patterns=["*.bin", "*.pth", "*.ckpt", "*.h5"],
+              )
+              PY
+          volumeMounts:
+            - name: work
+              mountPath: /work
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+      containers:
+        - name: quantize
+          image: {{ dgx_quantize_image }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              cd /work
+              # The image layout moves between llama.cpp releases; find the
+              # converter and the quantiser instead of assuming /app.
+              CONVERT=""
+              for candidate in \
+                /app/convert_hf_to_gguf.py \
+                /app/convert-hf-to-gguf.py \
+                /app/convert_hf_to_gguf/convert_hf_to_gguf.py \
+                /app/examples/convert_hf_to_gguf.py; do
+                if [ -f "$candidate" ]; then CONVERT="$candidate"; break; fi
+              done
+              if [ -z "$CONVERT" ]; then
+                echo "no convert_hf_to_gguf.py found; image layout:" >&2
+                ls -1 /app 2>/dev/null | head -40 >&2
+                exit 1
+              fi
+              QUANT=""
+              for candidate in \
+                "$(command -v llama-quantize || true)" \
+                /app/llama-quantize \
+                /app/build/bin/llama-quantize \
+                /usr/local/bin/llama-quantize \
+                /app/bin/llama-quantize; do
+                if [ -n "$candidate" ] && [ -x "$candidate" ]; then QUANT="$candidate"; break; fi
+              done
+              if [ -z "$QUANT" ]; then
+                echo "no llama-quantize binary found; image layout:" >&2
+                ls -1 /app 2>/dev/null | head -40 >&2
+                exit 1
+              fi
+              PYTHON="$(command -v python3 || command -v python)"
+              if [ -z "$(ls -A /work/source 2>/dev/null)" ]; then
+                echo "the HuggingFace download produced no files" >&2
+                exit 1
+              fi
+              echo "converter=$CONVERT quantizer=$QUANT python=$PYTHON"
+              "$PYTHON" "$CONVERT" /work/source \
+                --outfile /work/model-f16.gguf --outtype f16
+              "$QUANT" /work/model-f16.gguf \
+                /quantized/{{ dgx_quantize_model | replace('/', '_') }}-{{ dgx_quantize_outtype }}.gguf \
+                {{ dgx_quantize_outtype }}
+              rm -f /work/model-f16.gguf
+              echo "wrote /quantized/{{ dgx_quantize_model | replace('/', '_') }}-{{ dgx_quantize_outtype }}.gguf"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: output
+              mountPath: /quantized
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "10"
+              memory: {{ dgx_quantize_memory_gib | int }}Gi
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 120Gi
+        - name: output
+          persistentVolumeClaim:
+            claimName: {{ dgx_quantize_pvc }}

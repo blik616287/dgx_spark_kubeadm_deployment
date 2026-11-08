@@ -1,0 +1,7 @@
+---
+# Drain, delete and kubeadm-reset a worker. Never touches the control plane.
+- name: Remove a worker from the cluster
+  hosts: "{{ dgx_join_group | default('dgx') }}"
+  gather_facts: true
+  roles:
+    - dgx_leave

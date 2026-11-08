@@ -1,0 +1,95 @@
+---
+# helm upgrade the serving stack with a rollback that actually runs.
+#
+# `helm upgrade --wait` fails the release if a pod never becomes ready, but the
+# cluster is left on the new (broken) revision. This role records the revision
+# that was serving first, upgrades, and rolls back to that exact revision when
+# the upgrade fails, so a failed `make upgrade` leaves the previous model
+# serving.
+
+- name: Require the serving release
+  ansible.builtin.command:
+    argv: [helm, -n, "{{ dgx_models_namespace }}", status, "{{ dgx_helm_release }}", -o, json]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_upgrade_status
+  changed_when: false
+  failed_when: false
+
+- name: Stop when the release is not installed
+  ansible.builtin.fail:
+    msg: >-
+      The Helm release {{ dgx_helm_release }} was not found in
+      {{ dgx_models_namespace }}. Run `make models` first: upgrade rolls back
+      an existing release, it does not create one.
+  when: dgx_upgrade_status.rc != 0
+
+- name: Record the revision that is serving now
+  ansible.builtin.set_fact:
+    dgx_upgrade_from_revision: "{{ (dgx_upgrade_status.stdout | from_json).version }}"
+
+- name: Upgrade the serving stack
+  vars:
+    dgx_upgrade_flags: >-
+      {{ (['--wait'] if dgx_upgrade_wait | bool else [])
+         + (['--version', dgx_upgrade_revision | string]
+            if dgx_upgrade_revision | length > 0 else [])
+         + (['--set', dgx_upgrade_set | join(',')]
+            if dgx_upgrade_set | length > 0 else []) }}
+  ansible.builtin.command:
+    argv: >-
+      {{ ['helm', 'upgrade', dgx_helm_release, dgx_chart_dir,
+          '--namespace', dgx_models_namespace, '--reuse-values',
+          '--timeout', dgx_upgrade_helm_timeout] + dgx_upgrade_flags }}
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_upgrade_run
+  changed_when: dgx_upgrade_run.rc == 0
+  failed_when: false
+
+- name: Roll back to the serving revision
+  ansible.builtin.command:
+    argv: [helm, -n, "{{ dgx_models_namespace }}", rollback, "{{ dgx_helm_release }}",
+           "{{ dgx_upgrade_from_revision }}", "--wait", "--timeout", "{{ dgx_upgrade_helm_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_upgrade_rollback
+  changed_when: dgx_upgrade_rollback.rc == 0
+  failed_when: false
+  when:
+    - dgx_upgrade_run.rc != 0
+    - dgx_upgrade_rollback_on_failure | bool
+
+- name: Report the upgrade outcome
+  ansible.builtin.debug:
+    msg:
+      - "Upgrade rc={{ dgx_upgrade_run.rc }} from revision {{ dgx_upgrade_from_revision }}"
+      - "{{ dgx_upgrade_run.stdout_lines | default([]) | last | default('') }}"
+      - >-
+        {{ 'Upgrade succeeded.' if dgx_upgrade_run.rc == 0
+           else ('Rolled back to revision ' ~ dgx_upgrade_from_revision
+                 ~ ' (rc=' ~ (dgx_upgrade_rollback.rc | default('n/a')) ~ ')'
+                 if dgx_upgrade_rollback_on_failure | bool
+                 else 'Not rolled back: dgx_upgrade_rollback_on_failure is false.') }}
+
+- name: Fail when the upgrade failed
+  ansible.builtin.fail:
+    msg: |
+      helm upgrade failed (rc={{ dgx_upgrade_run.rc }}).
+      --- stdout ---
+      {{ dgx_upgrade_run.stdout }}
+      --- stderr ---
+      {{ dgx_upgrade_run.stderr }}
+  when: dgx_upgrade_run.rc != 0
+
+- name: Refuse to call a failed rollback a success
+  ansible.builtin.fail:
+    msg: |
+      The upgrade failed and the automatic rollback also failed
+      (rc={{ dgx_upgrade_rollback.rc }}). The previous revision is not serving.
+      --- rollback stderr ---
+      {{ dgx_upgrade_rollback.stderr }}
+  when:
+    - dgx_upgrade_run.rc != 0
+    - dgx_upgrade_rollback_on_failure | bool
+    - dgx_upgrade_rollback.rc != 0

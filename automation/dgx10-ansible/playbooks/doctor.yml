@@ -1,0 +1,9 @@
+---
+# Read-only diagnosis of the whole stack, including the models this selection
+# serves. Errors fail the play; warnings are printed and recorded.
+- name: Diagnose the dgx10 stack
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - dgx_doctor

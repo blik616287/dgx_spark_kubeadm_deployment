@@ -1,0 +1,12 @@
+---
+# Install Argo CD, render the current selection, and register the Application.
+# `make gitops` renders without installing anything; this target is the one
+# that makes the tree live.
+- name: Install Argo CD and register the application
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - dgx_gitops
+    - role: dgx_argocd
+      when: dgx_argocd_enabled | bool

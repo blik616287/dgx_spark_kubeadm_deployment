@@ -1,0 +1,7 @@
+---
+# helm upgrade with an automatic rollback to the revision that was serving.
+- name: Upgrade the serving stack
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_upgrade

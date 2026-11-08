@@ -1,0 +1,8 @@
+---
+# Restore a Longhorn snapshot or backup into a NEW PVC. The source volume is
+# never modified, so a wrong choice is discarded by deleting the new claim.
+- name: Restore a protected volume
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_restore

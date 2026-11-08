@@ -1,0 +1,9 @@
+---
+# Prometheus, Grafana and a GPU dashboard. Optional, and independent of the
+# model stack.
+- name: Install the monitoring stack
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - role: dgx_observability
+      when: dgx_observability_enabled | bool

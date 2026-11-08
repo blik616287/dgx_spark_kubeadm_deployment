@@ -1,0 +1,24 @@
+# Rendered after discovering where the GPU Operator put its DCGM exporter: the
+# namespace and service name move between operator releases, and a hard-coded
+# ServiceMonitor silently scrapes nothing when they do.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: {{ dgx_observability_namespace }}
+  labels:
+    dgx10/monitor: gpu
+    release: {{ dgx_observability_release }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ dgx_observability_dcgm_namespace }}]
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+{% if dgx_observability_dcgm_port %}
+    - port: {{ dgx_observability_dcgm_port }}
+{% else %}
+    - targetPort: {{ dgx_observability_dcgm_target_port }}
+{% endif %}
+      interval: {{ dgx_observability_scrape_interval }}

@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Minimal OpenAI SDK client against the DGX gateway.
+
+Run after `source client.env`. The only differences from a hosted provider are
+the base URL and the key; the request shape is the standard one.
+"""
+
+{% set chat_models = dgx_catalog_meta | dict2items | selectattr('key', 'in', dgx_served_models) | selectattr('value.capabilities', 'contains', 'chat') | map(attribute='key') | list %}
+import os
+
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=os.environ["DGX_GATEWAY_URL"],
+    api_key=os.environ["DGX_GATEWAY_KEY"],
+)
+model = os.environ.get("DGX_GATEWAY_MODEL", "{{ chat_models | first }}")
+
+response = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "Reply with exactly: DGX10-OK"}],
+    max_tokens=16,
+    temperature=0,
+)
+print(response.choices[0].message.content)
+
+# Streaming works the same way; the gateway passes chunks through unchanged.
+stream = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "Count from one to five."}],
+    max_tokens=32,
+    stream=True,
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content
+    if delta:
+        print(delta, end="", flush=True)
+print()

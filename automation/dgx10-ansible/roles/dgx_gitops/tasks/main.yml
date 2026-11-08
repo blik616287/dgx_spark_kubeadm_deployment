@@ -1,0 +1,57 @@
+---
+# Render an Argo CD tree for the current selection. The renderer always writes
+# the tree so it can be reviewed and committed even when Argo CD is not
+# installed; `make argocd` installs Argo CD and registers the Application.
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Render the GitOps tree
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, dgx_framework_dir + '/lib/render_gitops.py',
+               '--namespace', dgx_models_namespace,
+               '--repo-url', dgx_gitops_repo_url,
+               '--revision', dgx_gitops_revision,
+               '--gitops', dgx_gitops_dir]
+              + (['--profile', dgx_profile] if dgx_profile | length > 0
+                 else ['--model'] + dgx_served_models)
+              + (['--pin-digests'] if dgx_gitops_pin_digests | bool else [])
+              + (['--offline'] if dgx_gitops_offline | bool else []) }}"
+  delegate_to: localhost
+  register: dgx_gitops_render
+  changed_when: false
+
+- name: Show the rendered tree
+  ansible.builtin.command:
+    argv: [find, "{{ dgx_gitops_dir }}", -type, f]
+  delegate_to: localhost
+  register: dgx_gitops_files
+  changed_when: false
+
+- name: List the artifacts
+  ansible.builtin.debug:
+    var: dgx_gitops_files.stdout_lines
+
+- name: Apply the Application when Argo CD is installed
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_gitops_dir }}/app.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gitops_apply
+  changed_when: "'created' in dgx_gitops_apply.stdout or 'configured' in dgx_gitops_apply.stdout"
+  failed_when:
+    - dgx_gitops_apply.rc != 0
+    - "'no matches for kind' not in dgx_gitops_apply.stderr"
+  when: dgx_gitops_apply_enabled | bool
+
+- name: Note that the tree was rendered but not applied
+  ansible.builtin.debug:
+    msg: >-
+      GitOps tree written to {{ dgx_gitops_dir }}. Run `make argocd` to install
+      Argo CD and register the Application, or pass
+      dgx_gitops_apply_enabled=true when Argo CD is already installed.
+  when: not (dgx_gitops_apply_enabled | bool)

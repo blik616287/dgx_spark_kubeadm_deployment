@@ -1,0 +1,11 @@
+---
+# Full path: preflight → repo → cluster → models → verify.
+# The same steps as `make bootstrap k8s models verify`, in one run.
+- name: Bootstrap the controller and the target
+  import_playbook: bootstrap.yml
+- name: Install the Kubernetes stack
+  import_playbook: k8s.yml
+- name: Download weights and deploy the models
+  import_playbook: models.yml
+- name: Verify the served models
+  import_playbook: verify.yml

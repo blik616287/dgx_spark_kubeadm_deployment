@@ -1,0 +1,206 @@
+---
+# The live acceptance run: one verdict for the whole box.
+#
+# The other roles each stop at their own failure. This play sets their
+# allow-fail flags, runs them all, and then decides once — so a single run
+# tells you every problem instead of only the first one.
+
+- name: Read the node inventory
+  ansible.builtin.command:
+    argv: [kubectl, get, nodes, --no-headers]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_acceptance_nodes
+  changed_when: false
+  failed_when: false
+
+- name: Read the pod phases in the model namespace
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", get, pods, --no-headers,
+           -o, "custom-columns=NAME:.metadata.name,PHASE:.status.phase"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_acceptance_pods
+  changed_when: false
+  failed_when: false
+
+- name: Read the storage classes
+  ansible.builtin.command:
+    argv: [kubectl, get, storageclass, --no-headers,
+           -o, "custom-columns=NAME:.metadata.name"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_acceptance_sc
+  changed_when: false
+  failed_when: false
+
+- name: Summarise the cluster
+  ansible.builtin.set_fact:
+    dgx_acceptance_cluster:
+      reachable: "{{ dgx_acceptance_nodes.rc == 0 }}"
+      nodes_total: "{{ dgx_acceptance_nodes.stdout_lines | default([]) | length }}"
+      nodes_ready: >-
+        {{ dgx_acceptance_nodes.stdout_lines | default([])
+           | select('match', '^\S+\s+Ready(\s|$)') | list | length }}
+      node_names: >-
+        {{ dgx_acceptance_nodes.stdout_lines | default([])
+           | map('split') | map('first') | list }}
+      pods_total: "{{ dgx_acceptance_pods.stdout_lines | default([]) | length }}"
+      pods_not_running: >-
+        {{ dgx_acceptance_pods.stdout_lines | default([])
+           | map('split') | map('last')
+           | reject('in', ['Running', 'Succeeded']) | list | length }}
+      storage_classes: >-
+        {{ dgx_acceptance_sc.stdout_lines | default([])
+           | map('split') | map('first') | list }}
+
+- name: Note which required storage classes are missing
+  ansible.builtin.set_fact:
+    dgx_acceptance_missing_storage: >-
+      {{ dgx_acceptance_storage_classes
+         | reject('in', dgx_acceptance_cluster.storage_classes) | list }}
+
+- name: Check whether the gateway is deployed
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_gateway_namespace }}", get, deployment/litellm, -o, name]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_acceptance_gateway_deploy
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether the gateway can be probed
+  ansible.builtin.set_fact:
+    dgx_acceptance_gateway_attempted: >-
+      {{ (dgx_acceptance_gateway_deploy.rc == 0)
+         and (dgx_gateway_master_key | length >= 16) }}
+
+- name: List the models the gateway exposes
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_gateway_namespace }}", exec, deployment/litellm, --,
+           curl, -fsS, -m, "15",
+           -H, "Authorization: Bearer {{ dgx_gateway_master_key }}",
+           "http://localhost:{{ dgx_gateway_port }}/v1/models"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_acceptance_gateway_call
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: dgx_acceptance_gateway_attempted | bool
+
+- name: Summarise the gateway
+  ansible.builtin.set_fact:
+    dgx_acceptance_gateway:
+      deployed: "{{ dgx_acceptance_gateway_deploy.rc == 0 }}"
+      attempted: "{{ dgx_acceptance_gateway_attempted | bool }}"
+      ok: >-
+        {{ (dgx_acceptance_gateway_call.rc == 0)
+           and ('"data"' in (dgx_acceptance_gateway_call.stdout | default('')))
+           if dgx_acceptance_gateway_attempted | bool else false }}
+      models: >-
+        {{ ((dgx_acceptance_gateway_call.stdout | from_json).data
+            | map(attribute='id') | list)
+           if (dgx_acceptance_gateway_attempted | bool
+               and dgx_acceptance_gateway_call.rc == 0
+               and (dgx_acceptance_gateway_call.stdout | trim | length > 0))
+           else [] }}
+
+- name: Count the failed probes, eval scores and doctor errors
+  ansible.builtin.set_fact:
+    dgx_acceptance_probes: "{{ dgx_probe_reports | default([]) }}"
+    dgx_acceptance_eval: "{{ dgx_eval_reports | default([]) }}"
+    dgx_acceptance_doctor: "{{ dgx_doctor_findings | default([]) }}"
+
+- name: Decide the verdict
+  ansible.builtin.set_fact:
+    dgx_acceptance_result:
+      stamp: "{{ dgx_report_stamp }}"
+      models: "{{ dgx_served_models }}"
+      cluster: "{{ dgx_acceptance_cluster }}"
+      missing_storage_classes: "{{ dgx_acceptance_missing_storage }}"
+      plan: "{{ dgx_plan_result.plan | default({}) }}"
+      probes: "{{ dgx_acceptance_probes }}"
+      eval: "{{ dgx_acceptance_eval }}"
+      doctor: "{{ dgx_acceptance_doctor }}"
+      gateway: "{{ dgx_acceptance_gateway }}"
+      checks:
+        cluster_reachable: "{{ dgx_acceptance_cluster.reachable | bool }}"
+        all_nodes_ready: >-
+          {{ (dgx_acceptance_cluster.nodes_total | int > 0)
+             and (dgx_acceptance_cluster.nodes_ready | int
+                  == dgx_acceptance_cluster.nodes_total | int) }}
+        all_pods_running: "{{ dgx_acceptance_cluster.pods_not_running | int == 0 }}"
+        storage_present: "{{ dgx_acceptance_missing_storage | length == 0 }}"
+        plan_fits: "{{ (dgx_plan_result.plan | default({})).verdict | default('FAIL') != 'FAIL' }}"
+        probes_pass: "{{ dgx_acceptance_probes | rejectattr('ok') | list | length == 0 }}"
+        doctor_clean: "{{ (dgx_doctor_errors | default(0) | int) == 0 }}"
+        eval_meets_floor: >-
+          {{ dgx_acceptance_eval
+             | selectattr('score', 'lessthan', dgx_eval_min_score | float) | list
+             | length == 0 }}
+        gateway_ok: >-
+          {{ (not (dgx_acceptance_gateway_attempted | bool))
+             or (dgx_acceptance_gateway.ok | bool) }}
+      ok: >-
+        {{ (dgx_acceptance_cluster.reachable | bool)
+           and (dgx_acceptance_cluster.nodes_total | int > 0)
+           and (dgx_acceptance_cluster.nodes_ready | int
+                == dgx_acceptance_cluster.nodes_total | int)
+           and (dgx_acceptance_cluster.pods_not_running | int == 0)
+           and (dgx_acceptance_missing_storage | length == 0)
+           and ((dgx_plan_result.plan | default({})).verdict | default('FAIL') != 'FAIL')
+           and (dgx_acceptance_probes | rejectattr('ok') | list | length == 0)
+           and ((dgx_doctor_errors | default(0) | int) == 0)
+           and (dgx_acceptance_eval
+                | selectattr('score', 'lessthan', dgx_eval_min_score | float) | list
+                | length == 0)
+           and ((not (dgx_acceptance_gateway_attempted | bool))
+                or (dgx_acceptance_gateway.ok | bool)) }}
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write the acceptance report as JSON
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/acceptance-{{ dgx_report_stamp }}.json"
+    mode: "0644"
+    content: "{{ dgx_acceptance_result | to_nice_json }}\n"
+  delegate_to: localhost
+
+- name: Keep a stable copy
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/acceptance-latest.json"
+    mode: "0644"
+    content: "{{ dgx_acceptance_result | to_nice_json }}\n"
+  delegate_to: localhost
+
+- name: Write the acceptance report as Markdown
+  ansible.builtin.template:
+    src: report.md.j2
+    dest: "{{ dgx_report_dir }}/acceptance-{{ dgx_report_stamp }}.md"
+    mode: "0644"
+  vars:
+    result: "{{ dgx_acceptance_result }}"
+  delegate_to: localhost
+
+- name: Show the verdict
+  ansible.builtin.debug:
+    msg:
+      - "Acceptance: {{ 'PASS' if dgx_acceptance_result.ok | bool else 'FAIL' }}"
+      - "Report: {{ dgx_report_dir }}/acceptance-{{ dgx_report_stamp }}.md"
+
+- name: Stop on a failed acceptance run
+  ansible.builtin.assert:
+    that:
+      - dgx_acceptance_result.ok | bool
+    fail_msg: >-
+      Acceptance failed. Read
+      {{ dgx_report_dir }}/acceptance-{{ dgx_report_stamp }}.md; each failing
+      check names the role whose report has the detail.
+    quiet: true
+  when: not (dgx_acceptance_allow_fail | bool)

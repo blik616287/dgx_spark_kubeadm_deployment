@@ -1,0 +1,164 @@
+---
+# Prove the deployment from the outside in: cluster, then pods, then the
+# InferenceService, then an actual completion. A green helm release is not
+# evidence that a model serves; the chat completion is.
+
+- name: Resolve the smoke-test model
+  ansible.builtin.set_fact:
+    dgx_smoke_target: >-
+      {{ dgx_smoke_model if dgx_smoke_model | length > 0
+         else (dgx_served_models | first) }}
+
+- name: Describe each served model's deployment and port
+  ansible.builtin.set_fact:
+    dgx_served_detail: >-
+      {{ dgx_catalog_meta | dict2items
+         | selectattr('key', 'in', dgx_served_models) | list }}
+
+- name: Require the smoke-test model to be one that is deployed
+  ansible.builtin.assert:
+    that:
+      - dgx_smoke_target in dgx_served_models
+    fail_msg: >-
+      dgx_smoke_target resolves to {{ dgx_smoke_target }}, which is not in the
+      served set {{ dgx_served_models }}. Set dgx_smoke_model to a served model.
+    quiet: true
+
+- name: List cluster nodes
+  ansible.builtin.command: kubectl get nodes -o wide
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_nodes
+  changed_when: false
+
+- name: Show cluster nodes
+  ansible.builtin.debug:
+    var: dgx_nodes.stdout_lines
+
+- name: Identify nodes that are not Ready
+  ansible.builtin.set_fact:
+    dgx_nodes_not_ready: >-
+      {{ dgx_nodes.stdout_lines | default([])
+         | rejectattr('0', 'equalto', 'NAME')
+         | map('split') | selectattr('1', 'defined')
+         | rejectattr('1', 'equalto', 'Ready')
+         | map('first') | list }}
+
+- name: Require every node in the cluster to be Ready
+  ansible.builtin.assert:
+    that:
+      - dgx_nodes_not_ready | length == 0
+    fail_msg: >-
+      Nodes not Ready: {{ dgx_nodes_not_ready | join(', ') }}. A joined worker
+      that is NotReady is usually a CNI or kubelet problem; check
+      `kubectl describe node <name>` on the control plane.
+    quiet: true
+  when: dgx_verify_require_ready_nodes | bool
+
+- name: List llm-serving pods
+  ansible.builtin.command: kubectl -n llm-serving get pods -o wide
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_pods
+  changed_when: false
+
+- name: Show llm-serving pods
+  ansible.builtin.debug:
+    var: dgx_pods.stdout_lines
+
+- name: List InferenceServices
+  ansible.builtin.command: kubectl -n llm-serving get inferenceservice
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_isvc
+  changed_when: false
+  failed_when: false
+
+- name: Show InferenceServices (empty until KServe reconciles)
+  ansible.builtin.debug:
+    var: dgx_isvc.stdout_lines
+
+- name: List model PVCs
+  ansible.builtin.command: kubectl -n llm-serving get pvc
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_pvc
+  changed_when: false
+
+- name: Show model PVCs
+  ansible.builtin.debug:
+    var: dgx_pvc.stdout_lines
+
+- name: Wait for each enabled predictor to roll out
+  ansible.builtin.command: >-
+    kubectl -n llm-serving rollout status deployment/{{ item.key }}{{ '-predictor' if item.value.engine == 'ollama' else '' }}
+    --timeout=600s
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_served_detail }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: dgx_rollout
+  changed_when: false
+  retries: 3
+  delay: 20
+  until: dgx_rollout.rc == 0
+
+- name: List the models the Ollama runtime holds
+  ansible.builtin.command: >-
+    kubectl -n llm-serving exec deployment/{{ item.key }}-predictor -- ollama list
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_served_detail | selectattr('value.engine', 'equalto', 'ollama') | list }}"
+  loop_control:
+    label: "{{ item.key }}-predictor"
+  register: dgx_ollama_list
+  changed_when: false
+
+- name: Show the loaded model inventories
+  ansible.builtin.debug:
+    msg: "{{ item.item.key }}: {{ item.stdout_lines[1:] | default([]) }}"
+  loop: "{{ dgx_ollama_list.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: Resolve the smoke-test deployment and port
+  ansible.builtin.set_fact:
+    dgx_smoke_detail: >-
+      {{ dgx_served_detail | selectattr('key', 'equalto', dgx_smoke_target) | first }}
+    dgx_smoke_deployment: >-
+      {{ dgx_smoke_target }}{{ '-predictor'
+         if (dgx_served_detail | selectattr('key', 'equalto', dgx_smoke_target)
+             | first).value.engine == 'ollama' else '' }}
+
+- name: Smoke-test the OpenAI-compatible endpoint
+  ansible.builtin.shell: |
+    kubectl -n llm-serving exec deployment/{{ dgx_smoke_deployment }} -- \
+      curl -fsS http://localhost:{{ dgx_smoke_detail.value.port | default(11434) }}/v1/chat/completions \
+        -H 'Content-Type: application/json' \
+        -d '{"model":"{{ dgx_smoke_target }}","messages":[{"role":"user","content":"{{ dgx_smoke_prompt }}"}],"max_tokens":16}'
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_smoke
+  changed_when: false
+  retries: 12
+  delay: 15
+  until: dgx_smoke.rc == 0
+
+- name: Require a completion from the smoke test
+  ansible.builtin.assert:
+    that:
+      - dgx_smoke.rc == 0
+      - "'choices' in dgx_smoke.stdout"
+    fail_msg: >-
+      The smoke test did not return a completion. Response:
+      {{ dgx_smoke.stdout }} {{ dgx_smoke.stderr }}
+    quiet: true
+
+- name: Show the completion
+  ansible.builtin.debug:
+    msg: "{{ dgx_smoke.stdout }}"
+
+- name: Run functional probes and write the report
+  ansible.builtin.include_tasks: probe.yml
+  when: dgx_verify_probe | bool

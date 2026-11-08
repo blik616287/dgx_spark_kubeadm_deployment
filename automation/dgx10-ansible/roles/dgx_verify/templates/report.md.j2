@@ -1,0 +1,34 @@
+# DGX Spark verification — {{ stamp }}
+
+Models: {{ models | join(', ') }}
+
+Fit: **{{ plan.verdict }}** — {{ plan.used_gib }} / {{ plan.budget_gib }} GiB, {{ plan.slices_used }} / {{ plan.slices_max }} GPU slices.
+
+{% for probe in probes %}
+## {{ probe.model }}
+
+Overall: {% if probe.ok %}PASS{% else %}FAIL{% endif %}
+
+{% if probe.error is defined %}
+Error: `{{ probe.error }}`
+{% endif %}
+{% if probe.checks is defined %}
+
+| Check | Result | Detail |
+|---|---|---|
+{% for check in probe.checks %}
+| {{ check.name }} | {% if check.ok %}PASS{% elif check.soft %}SOFT{% else %}FAIL{% endif %} | {{ check.detail | to_json }} |
+{% endfor %}
+{% endif %}
+{% if probe.metrics is defined and probe.metrics %}
+
+Metrics: {% for key, value in probe.metrics.items() %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% if probes | rejectattr('ok') | list %}
+## Failures
+{% for probe in probes | rejectattr('ok') | list %}
+- {{ probe.model }}{% if probe.error is defined %}: {{ probe.error }}{% endif %}
+{% endfor %}
+{% endif %}

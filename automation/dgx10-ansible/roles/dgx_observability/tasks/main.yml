@@ -1,0 +1,223 @@
+---
+# Metrics for the box, not just the pods: Prometheus, Grafana, and the DCGM
+# exporter the GPU Operator already runs. The stack is optional; without it the
+# verify report is still the primary evidence that a model works.
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Use a supplied Grafana password or generate one once
+  ansible.builtin.set_fact:
+    dgx_grafana_password: >-
+      {{ dgx_observability_grafana_password
+         if dgx_observability_grafana_password | length > 0
+         else lookup('password', dgx_report_dir + '/.grafana-password chars=ascii_letters,digits length=24') }}
+
+- name: Add the Prometheus community chart repository
+  ansible.builtin.command:
+    argv: [helm, repo, add, prometheus-community, "{{ dgx_observability_repo }}"]
+  register: dgx_obs_repo
+  changed_when: "'already exists' not in dgx_obs_repo.stderr"
+
+- name: Refresh the chart index
+  ansible.builtin.command:
+    argv: [helm, repo, update, prometheus-community]
+  changed_when: false
+
+- name: Ensure the monitoring namespace exists
+  ansible.builtin.command:
+    argv: [kubectl, create, namespace, "{{ dgx_observability_namespace }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_ns
+  changed_when: dgx_obs_ns.rc == 0
+  failed_when:
+    - dgx_obs_ns.rc != 0
+    - "'AlreadyExists' not in dgx_obs_ns.stderr"
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the chart values
+  ansible.builtin.template:
+    src: values.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/observability-values.yaml"
+    mode: "0600"
+  no_log: true
+
+- name: Install or upgrade the monitoring stack
+  ansible.builtin.command:
+    argv: [helm, upgrade, --install, "{{ dgx_observability_release }}",
+           "{{ dgx_observability_chart }}",
+           --namespace, "{{ dgx_observability_namespace }}",
+           --values, "{{ dgx_remote_state_dir }}/observability-values.yaml",
+           --timeout, "{{ dgx_observability_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_install
+  changed_when: "'has been upgraded' in dgx_obs_install.stdout or 'has been installed' in dgx_obs_install.stdout"
+  no_log: false
+
+- name: Remove the rendered values file
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}/observability-values.yaml"
+    state: absent
+
+- name: Wait for Prometheus and Grafana
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_observability_namespace }}", rollout, status,
+           "deployment/{{ dgx_observability_release }}-grafana", "--timeout=600s"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_rollout
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: dgx_obs_rollout.rc == 0
+
+- name: Find the GPU Operator's DCGM exporter pods
+  ansible.builtin.command:
+    argv: [kubectl, get, pods, -A, -l, app=nvidia-dcgm-exporter,
+           --no-headers, -o, "custom-columns=NS:.metadata.namespace,NAME:.metadata.name"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_dcgm_pods
+  changed_when: false
+  failed_when: false
+
+- name: Fall back to any pod the operator named for DCGM
+  ansible.builtin.command:
+    argv: [kubectl, get, pods, -A, --no-headers,
+           -o, "custom-columns=NS:.metadata.namespace,NAME:.metadata.name"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_all_pods
+  changed_when: false
+  failed_when: false
+  when: dgx_obs_dcgm_pods.stdout | default('') | trim == ''
+
+- name: Resolve where the exporter lives
+  ansible.builtin.set_fact:
+    # An explicit override wins; otherwise take the first labelled pod, then
+    # the first pod whose name mentions DCGM. The pod's namespace is where its
+    # Service lives, which is what namespaceSelector needs.
+    dgx_observability_dcgm_namespace: >-
+      {{ dgx_observability_dcgm_namespace if dgx_observability_dcgm_namespace | length > 0
+         else ((dgx_obs_dcgm_pods.stdout | default('')).split()
+               | first | default('')) }}
+  when: dgx_observability_dcgm_namespace | length == 0
+
+- name: Resolve the exporter namespace from the pod list
+  ansible.builtin.set_fact:
+    dgx_observability_dcgm_namespace: >-
+      {{ (dgx_obs_all_pods.stdout_lines | default([])
+          | map('split') | selectattr('1', 'defined')
+          | selectattr('1', 'search', 'dcgm') | map('first') | list
+          | first | default('')) }}
+  when: dgx_observability_dcgm_namespace | length == 0
+
+- name: List the services beside the exporter
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_observability_dcgm_namespace }}", get, svc, -o, json]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_dcgm_svc_list
+  changed_when: false
+  failed_when: false
+  when: dgx_observability_dcgm_namespace | length > 0
+
+- name: Resolve the exporter service and its scrape port
+  ansible.builtin.set_fact:
+    dgx_observability_dcgm_service: >-
+      {{ dgx_observability_dcgm_service if dgx_observability_dcgm_service | length > 0
+         else ((dgx_obs_dcgm_svc_list.stdout | default('{}') | from_json).items
+               | selectattr('metadata.name', 'search', 'dcgm') | map(attribute='metadata.name')
+               | list | first | default('')) }}
+    dgx_obs_dcgm_ports: >-
+      {{ (((dgx_obs_dcgm_svc_list.stdout | default('{}') | from_json).items
+           | selectattr('metadata.name', 'search', 'dcgm') | list | first | default({}, true))
+          .spec.ports | default([])) }}
+  when:
+    - dgx_observability_dcgm_namespace | length > 0
+    - dgx_obs_dcgm_svc_list.stdout | default('') | trim | length > 0
+
+- name: Choose the scrape endpoint
+  ansible.builtin.set_fact:
+    # Prefer a named port (what Prometheus selects on), else the numeric
+    # target of the first port. DCGM's Service publishes both.
+    dgx_observability_dcgm_port: >-
+      {{ dgx_observability_dcgm_port if dgx_observability_dcgm_port | length > 0
+         else ((dgx_obs_dcgm_ports | selectattr('name', 'defined')
+                | map(attribute='name') | list | first | default(''))) }}
+    dgx_observability_dcgm_target_port: >-
+      {{ dgx_obs_dcgm_ports | map(attribute='targetPort') | list | first | default(9400) }}
+  when: dgx_obs_dcgm_ports is defined
+
+- name: Report a missing GPU exporter
+  ansible.builtin.debug:
+    msg: >-
+      No DCGM exporter found on the cluster. The GPU Operator provides it; on a
+      cluster without it the GPU dashboard stays empty. Set
+      dgx_observability_require_gpu=true to make this an error.
+  when: dgx_observability_dcgm_namespace | length == 0
+
+- name: Stop when the GPU exporter was required
+  ansible.builtin.assert:
+    that:
+      - dgx_observability_dcgm_namespace | length > 0
+      - dgx_observability_dcgm_service | length > 0
+    fail_msg: >-
+      dgx_observability_require_gpu is true but no DCGM exporter Service was
+      discovered. Check the GPU Operator pods, or pin
+      dgx_observability_dcgm_namespace and dgx_observability_dcgm_service.
+    quiet: true
+  when: dgx_observability_require_gpu | bool
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the ServiceMonitor for the discovered exporter
+  ansible.builtin.template:
+    src: servicemonitor.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/dcgm-servicemonitor.yaml"
+    mode: "0644"
+  when: dgx_observability_dcgm_namespace | length > 0
+
+- name: Scrape the GPU exporter the operator already runs
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/dcgm-servicemonitor.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_sm
+  changed_when: "'created' in dgx_obs_sm.stdout or 'configured' in dgx_obs_sm.stdout"
+  when: dgx_observability_dcgm_namespace | length > 0
+
+- name: Install the overview dashboard
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, -]
+    stdin: "{{ lookup('template', 'dashboard.yaml.j2') }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_obs_dashboard
+  changed_when: "'created' in dgx_obs_dashboard.stdout"
+
+- name: Show how to reach Grafana
+  ansible.builtin.debug:
+    msg:
+      - "Grafana: kubectl -n {{ dgx_observability_namespace }} port-forward svc/{{ dgx_observability_release }}-grafana 3000:80"
+      - "User: admin"
+      - "Password: {{ dgx_grafana_password if dgx_observability_show_password | bool else '(see ' + dgx_report_dir + '/.grafana-password, mode 0600)' }}"
+      - "Retention: {{ dgx_observability_retention }}"
+      - "GPU metrics: {{ (dgx_observability_dcgm_service + ' in ' + dgx_observability_dcgm_namespace)
+                          if dgx_observability_dcgm_namespace | length > 0
+                          else 'no DCGM exporter found (GPU panels will be empty)' }}"

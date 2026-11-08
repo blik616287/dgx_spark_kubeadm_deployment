@@ -1,0 +1,86 @@
+---
+# Non-Ollama engines: vLLM, llama.cpp, SGLang. The chart serves Ollama only, so
+# these run as plain Deployments beside it. The manifests come from the same
+# renderer the GitOps path uses, so what Ansible applies and what Argo CD would
+# apply cannot drift.
+#
+# Skipped silently when the resolved set has no engine models.
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  when: dgx_engine_models | length > 0
+
+- name: Render the engine manifests
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, dgx_framework_dir + '/lib/render_gitops.py',
+               '--namespace', dgx_models_namespace,
+               '--engines-only', dgx_report_dir + '/engines.yaml']
+              + (['--profile', dgx_profile] if dgx_profile | length > 0
+                 else ['--model'] + dgx_served_models)
+              + (['--offline'] if dgx_engines_offline | bool else [])
+              + (['--check-arch', dgx_engines_arch] if dgx_engines_check_arch | bool else []) }}"
+  delegate_to: localhost
+  register: dgx_engines_render
+  changed_when: false
+  when: dgx_engine_models | length > 0
+
+- name: Show which images were checked
+  ansible.builtin.debug:
+    msg: >-
+      Architecture check ({{ dgx_engines_arch }}): {{
+        'skipped' if not (dgx_engines_check_arch | bool)
+        else 'no image was refused' }}. {{ dgx_engines_render.stderr_lines | default([]) | join(' | ') }}
+  when: dgx_engine_models | length > 0
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+  when: dgx_engine_models | length > 0
+
+- name: Copy the engine manifests to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_report_dir }}/engines.yaml"
+    dest: "{{ dgx_remote_state_dir }}/engines.yaml"
+    mode: "0644"
+  when: dgx_engine_models | length > 0
+
+- name: Apply the engine manifests
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/engines.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_engines_apply
+  changed_when: "'created' in dgx_engines_apply.stdout or 'configured' in dgx_engines_apply.stdout"
+  when: dgx_engine_models | length > 0
+
+- name: Show what was applied
+  ansible.builtin.debug:
+    var: dgx_engines_apply.stdout_lines
+  when: dgx_engine_models | length > 0
+
+- name: Wait for each engine deployment
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_models_namespace }}", rollout, status,
+           "deployment/{{ item.name }}", "--timeout={{ dgx_engines_rollout_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_engine_models }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_engines_rollout
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: dgx_engines_rollout.rc == 0
+  when: dgx_engine_models | length > 0
+
+- name: Say when there is nothing to do
+  ansible.builtin.debug:
+    msg: No non-Ollama engines in this selection; nothing to apply.
+  when: dgx_engine_models | length == 0

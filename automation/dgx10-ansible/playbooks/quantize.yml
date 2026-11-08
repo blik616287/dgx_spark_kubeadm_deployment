@@ -1,0 +1,8 @@
+---
+# Experimental in-cluster quantisation. Refuses to run without
+# dgx_quantize_confirm=true, a HuggingFace repo and an output PVC.
+- name: Quantise a model in-cluster
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_quantize

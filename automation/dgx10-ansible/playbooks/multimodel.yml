@@ -1,0 +1,10 @@
+---
+# Reconcile the multi-model serving set without re-running the base download.
+# Assumes the cluster and KServe exist (`make models` or `make site` once).
+- name: Reconcile the multi-model serving set on dgx10
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_repo
+    - dgx_catalog
+    - dgx_multimodel

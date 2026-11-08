@@ -1,0 +1,59 @@
+# A new Longhorn volume, then a pre-bound PV/PVC pointing at it. The CSI
+# provisioner would normally create the Longhorn volume; a restore supplies
+# one that already exists, so both objects are written explicitly.
+apiVersion: longhorn.io/v1beta2
+kind: Volume
+metadata:
+  name: {{ dgx_restore_pvc }}
+  namespace: longhorn-system
+  labels:
+    dgx10/restore: {{ dgx_restore_name | to_json }}
+spec:
+  size: {{ dgx_restore_size_bytes }}
+  numberOfReplicas: 1
+  frontend: blockdev
+  accessMode: rwo
+  storageClassName: {{ dgx_restore_storage_class }}
+{% if dgx_restore_kind == 'backup' %}
+  fromBackup: {{ dgx_restore_backup_url | to_json }}
+{% else %}
+  dataSource:
+    sourceType: snapshot
+    sourceVolume: {{ dgx_restore_source_volume }}
+    snapshotName: {{ dgx_restore_snapshot_name }}
+{% endif %}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ dgx_restore_pvc }}
+  labels:
+    dgx10/restore: {{ dgx_restore_name | to_json }}
+spec:
+  capacity:
+    storage: {{ dgx_restore_size_resolved }}
+  accessModes: {{ dgx_restore_access_modes | to_json }}
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ dgx_restore_storage_class }}
+  claimRef:
+    namespace: {{ dgx_models_namespace }}
+    name: {{ dgx_restore_pvc }}
+  csi:
+    driver: driver.longhorn.io
+    volumeHandle: {{ dgx_restore_pvc }}
+    fsType: ext4
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ dgx_restore_pvc }}
+  namespace: {{ dgx_models_namespace }}
+  labels:
+    dgx10/restore: {{ dgx_restore_name | to_json }}
+spec:
+  accessModes: {{ dgx_restore_access_modes | to_json }}
+  storageClassName: {{ dgx_restore_storage_class }}
+  volumeName: {{ dgx_restore_pvc }}
+  resources:
+    requests:
+      storage: {{ dgx_restore_size_resolved }}

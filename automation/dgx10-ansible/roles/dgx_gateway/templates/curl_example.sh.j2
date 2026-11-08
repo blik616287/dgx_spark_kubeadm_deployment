@@ -1,0 +1,13 @@
+#!/bin/sh
+# One chat request per served model. Source client.env first.
+set -eu
+
+for model in {% for name, entry in dgx_catalog_meta.items() if name in dgx_served_models and 'chat' in entry.capabilities %}"{{ name }}" {% endfor %}; do
+  printf '%s: ' "$model"
+  curl -fsS "$DGX_GATEWAY_URL/chat/completions" \
+    -H "Authorization: Bearer $DGX_GATEWAY_KEY" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: DGX10-OK\"}],\"max_tokens\":16,\"temperature\":0}" \
+    | sed -n 's/.*"content":[[:space:]]*"\([^"]*\)".*/\1/p'
+  echo
+done

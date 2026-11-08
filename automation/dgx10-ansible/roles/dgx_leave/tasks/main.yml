@@ -1,0 +1,87 @@
+---
+# Remove a worker from the cluster and reset it to a clean kubeadm state.
+#
+# This is the missing half of `make join`: a node that is broken or is being
+# repurposed has to be drained, deleted from the control plane, and reset, or a
+# later join fails on stale certificates and CNI state.
+#
+# The control plane is never touched: removing the only control-plane node
+# destroys the cluster, which is `make teardown`'s job, not this one.
+
+- name: Refuse to leave without the confirmation
+  ansible.builtin.assert:
+    that:
+      - dgx_leave_confirm | bool
+    fail_msg: >-
+      Leaving is destructive (drain, delete, kubeadm reset). Re-run with
+      -e dgx_leave_confirm=true.
+    quiet: true
+
+- name: Refuse to remove the control plane
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname != dgx_control_plane
+    fail_msg: >-
+      {{ inventory_hostname }} is the control plane. `make leave` removes
+      workers only; use `make teardown` to remove the whole cluster.
+    quiet: true
+
+- name: Resolve the node name
+  ansible.builtin.set_fact:
+    dgx_leave_node_name: "{{ dgx_leave_node_name if dgx_leave_node_name | length > 0 else inventory_hostname }}"
+
+- name: Check whether this host was a member
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: dgx_leave_kubelet_conf
+
+- name: Drain the node on the control plane
+  ansible.builtin.command:
+    argv: [kubectl, drain, "{{ dgx_leave_node_name }}",
+           --ignore-daemonsets, --delete-emptydir-data,
+           "--timeout={{ dgx_leave_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  delegate_to: "{{ dgx_control_plane }}"
+  register: dgx_leave_drain_run
+  changed_when: dgx_leave_drain_run.rc == 0
+  failed_when: false
+  when:
+    - dgx_leave_drain | bool
+    - dgx_leave_kubelet_conf.stat.exists
+
+- name: Delete the node object
+  ansible.builtin.command:
+    argv: [kubectl, delete, node, "{{ dgx_leave_node_name }}", --ignore-not-found]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  delegate_to: "{{ dgx_control_plane }}"
+  register: dgx_leave_delete
+  changed_when: "'deleted' in dgx_leave_delete.stdout"
+
+- name: Reset kubeadm on the worker
+  ansible.builtin.command:
+    argv: [kubeadm, reset, -f, --cri-socket, unix:///run/containerd/containerd.sock]
+  become: true
+  register: dgx_leave_reset
+  changed_when: dgx_leave_reset.rc == 0
+  when: dgx_leave_kubelet_conf.stat.exists
+
+- name: Remove the CNI configuration and admin kubeconfig
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - /etc/cni/net.d
+    - /etc/kubernetes
+    - "{{ ansible_env.HOME }}/.kube/config"
+  when: dgx_leave_kubelet_conf.stat.exists
+
+- name: Report the node state
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{ 'was not a member (node object removed only)'
+         if not dgx_leave_kubelet_conf.stat.exists
+         else ('drained and reset' if dgx_leave_drain | bool else 'reset (drain skipped)') }}

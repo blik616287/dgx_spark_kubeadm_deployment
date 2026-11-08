@@ -1,0 +1,61 @@
+---
+# One command from bare metal to a verified endpoint: bootstrap the host, build
+# the cluster only if it is not already there, deploy the selected models and
+# any non-Ollama engines, install the gateway, then prove the result.
+#
+# The cluster probe makes this safe to re-run: a Ready control plane skips
+# install-k8s.yml (~20-40 min) unless dgx_up_force_cluster_install=true.
+- name: Bring up the DGX Spark serving stack
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_preflight
+    - dgx_repo
+
+  tasks:
+    - name: Probe the existing cluster
+      ansible.builtin.command:
+        argv: [kubectl, get, nodes, --no-headers]
+      environment:
+        KUBECONFIG: "{{ dgx_kubeconfig }}"
+      register: dgx_up_nodes
+      changed_when: false
+      failed_when: false
+
+    - name: Decide whether the cluster needs building
+      ansible.builtin.set_fact:
+        dgx_up_cluster_ready: >-
+          {{ (dgx_up_nodes.rc == 0)
+             and (' Ready ' in dgx_up_nodes.stdout)
+             and not (dgx_up_force_cluster_install | bool) }}
+
+    - name: Note the decision
+      ansible.builtin.debug:
+        msg: >-
+          Cluster {{ 'is Ready; skipping install-k8s.yml' if dgx_up_cluster_ready | bool
+                     else 'is absent or not Ready; install-k8s.yml will run' }}
+
+- name: Build the cluster when it is missing
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - role: dgx_cluster
+      when: not (dgx_up_cluster_ready | default(false) | bool)
+
+- name: Serve the selected models
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - dgx_models
+    - dgx_engines
+    - role: dgx_gateway
+      when: dgx_gateway_enabled | bool
+
+- name: Verify what was built
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_verify
+    - role: dgx_eval
+      when: dgx_eval_enabled | bool

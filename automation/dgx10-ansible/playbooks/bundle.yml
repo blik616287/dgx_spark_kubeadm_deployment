@@ -1,0 +1,8 @@
+---
+# Offline bundle: images, charts and weights with a sha256 manifest.
+# ACTION=create on a connected box; ACTION=verify or ACTION=load at the site.
+- name: Move the stack across an air gap
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_bundle

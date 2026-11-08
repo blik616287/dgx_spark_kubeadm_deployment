@@ -1,0 +1,79 @@
+# Acceptance run — {{ result.stamp }}
+
+**Verdict: {% if result.ok %}PASS{% else %}FAIL{% endif %}**
+
+Models: {{ result.models | join(', ') }}
+
+| Check | Result |
+|---|---|
+{% for name, value in result.checks.items() %}
+| {{ name }} | {% if value %}PASS{% else %}FAIL{% endif %} |
+{% endfor %}
+
+## Cluster
+
+- Nodes: {{ result.cluster.nodes_ready }} / {{ result.cluster.nodes_total }} Ready
+  {% if result.cluster.node_names %}({{ result.cluster.node_names | join(', ') }}){% endif %}
+- Model pods not running: {{ result.cluster.pods_not_running }} of {{ result.cluster.pods_total }}
+{% if result.missing_storage_classes %}
+- Missing storage classes: {{ result.missing_storage_classes | join(', ') }}
+{% endif %}
+
+## Fit
+
+{% if result.plan %}
+{{ result.plan.verdict }} — {{ result.plan.used_gib }} / {{ result.plan.budget_gib }} GiB,
+{{ result.plan.slices_used }} / {{ result.plan.slices_max }} GPU slices.
+{% else %}
+No plan was recorded.
+{% endif %}
+
+## Probes
+
+{% if result.probes %}
+| Model | Result | Checks failed |
+|---|---|---|
+{% for probe in result.probes %}
+| {{ probe.model }} | {% if probe.ok %}PASS{% else %}FAIL{% endif %} | {{ probe.checks | rejectattr('ok') | map(attribute='name') | list | join(', ') or '-' }} |
+{% endfor %}
+{% else %}
+No probes ran. Set `dgx_verify_probe=true` to include them.
+{% endif %}
+
+## Doctor
+
+{% if result.doctor %}
+| Level | Check | Detail |
+|---|---|---|
+{% for finding in result.doctor %}
+| {{ finding.level }} | {{ finding.check }} | {{ finding.detail }} |
+{% endfor %}
+{% else %}
+No findings.
+{% endif %}
+
+## Evaluation
+
+{% if result.eval %}
+| Model | Score | Passed |
+|---|---|---|
+{% for report in result.eval %}
+| {{ report.model }} | {{ report.score }} | {{ report.passed }}/{{ report.total }} |
+{% endfor %}
+{% else %}
+No eval reports.
+{% endif %}
+
+## Gateway
+
+{% if result.gateway.attempted %}
+{% if result.gateway.ok %}
+Reachable. Models: {{ result.gateway.models | join(', ') }}.
+{% else %}
+Deployed but did not answer a chat-completions probe.
+{% endif %}
+{% elif result.gateway.deployed %}
+Deployed; not probed because no master key was available to this run.
+{% else %}
+Not deployed.
+{% endif %}

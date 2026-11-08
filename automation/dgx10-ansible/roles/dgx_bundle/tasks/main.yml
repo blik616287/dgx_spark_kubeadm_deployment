@@ -1,0 +1,56 @@
+---
+# Build, verify or load the offline bundle: images, charts and model weights in
+# one directory with a sha256 manifest. `create` runs on a connected DGX;
+# `verify` and `load` run at the isolated site.
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Copy the bundle script to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_framework_dir }}/scripts/bundle.sh"
+    dest: "{{ dgx_remote_state_dir }}/bundle.sh"
+    mode: "0755"
+
+- name: Refuse an unknown action
+  ansible.builtin.assert:
+    that:
+      - dgx_bundle_action in ['create', 'verify', 'load']
+    fail_msg: "dgx_bundle_action must be create, verify or load (got {{ dgx_bundle_action }})."
+    quiet: true
+
+- name: Run the bundle action
+  ansible.builtin.command:
+    argv: [bash, "{{ dgx_remote_state_dir }}/bundle.sh",
+           "{{ dgx_bundle_action }}", "{{ dgx_bundle_dir }}"]
+  environment:
+    KUBECTL: kubectl
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+    DGX_NAMESPACE: "{{ dgx_models_namespace }}"
+    DGX_IMAGES: "{{ dgx_bundle_images }}"
+    DGX_CHARTS: "{{ dgx_bundle_charts }}"
+    DGX_PVCS: "{{ dgx_bundle_pvcs }}"
+  register: dgx_bundle_run
+  changed_when: dgx_bundle_action in ['create', 'load']
+  failed_when: dgx_bundle_run.rc != 0
+
+- name: Show the bundle output
+  ansible.builtin.debug:
+    var: dgx_bundle_run.stdout_lines
+
+- name: Write the bundle log
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/bundle-{{ dgx_bundle_action }}-{{ dgx_report_stamp }}.txt"
+    mode: "0644"
+    content: "{{ dgx_bundle_run.stdout }}\n{{ dgx_bundle_run.stderr }}"
+  delegate_to: localhost

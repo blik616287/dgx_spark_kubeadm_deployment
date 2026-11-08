@@ -1,0 +1,41 @@
+---
+# install-k8s.yml is long-running and drives its own become/escalation. We run
+# it as a child process on the target rather than importing it, so its vars,
+# handlers and fact scope stay isolated from this framework.
+
+- name: "Run the install playbook on the target: {{ dgx_k8s_playbook }}"
+  ansible.builtin.command:
+    argv:
+      - ansible-playbook
+      - -i
+      - "{{ dgx_inner_inventory }}"
+      - "{{ dgx_k8s_playbook }}"
+      - --become
+      - -e
+      - "local_user={{ dgx_local_user }}"
+      - -e
+      - "kubeconfig={{ dgx_kubeconfig }}"
+  args:
+    chdir: "{{ dgx_repo_dir }}"
+  environment:
+    ANSIBLE_HOST_KEY_CHECKING: "false"
+    ANSIBLE_FORCE_COLOR: "false"
+  register: dgx_k8s_run
+  changed_when: true
+
+- name: Show the cluster build output
+  ansible.builtin.debug:
+    var: dgx_k8s_run.stdout_lines
+  when:
+    - dgx_k8s_run.rc == 0
+    - dgx_show_playbook_output | bool
+
+- name: Fail with the tail of the playbook output
+  ansible.builtin.fail:
+    msg: |
+      {{ dgx_k8s_playbook }} failed (rc={{ dgx_k8s_run.rc }}).
+      --- last 40 lines ---
+      {{ dgx_k8s_run.stdout_lines[-40:] | join('\n') }}
+      --- stderr ---
+      {{ dgx_k8s_run.stderr }}
+  when: dgx_k8s_run.rc != 0

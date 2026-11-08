@@ -1,0 +1,70 @@
+---
+# Join workers to the control plane. The token is short-lived and printed by
+# kubeadm on the control plane; it is never written to a file on the controller
+# and the join command is marked no_log so it does not land in a transcript.
+#
+# Re-running is safe: a node that already has /etc/kubernetes/kubelet.conf is
+# skipped, so `make join` does nothing on a joined worker.
+
+- name: Check whether this host is already a member
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: dgx_join_kubelet_conf
+
+- name: Confirm this is not the control plane
+  ansible.builtin.set_fact:
+    dgx_join_is_control_plane: "{{ inventory_hostname == dgx_control_plane }}"
+
+- name: Read the join command on the control plane
+  ansible.builtin.command:
+    argv: [kubeadm, token, create, --print-join-command]
+  become: true
+  delegate_to: "{{ dgx_control_plane }}"
+  run_once: true
+  register: dgx_join_command
+  changed_when: false
+  no_log: true
+
+- name: Refuse to continue without a join command
+  ansible.builtin.assert:
+    that:
+      - dgx_join_command.stdout | default('') | trim | length > 0
+    fail_msg: >-
+      kubeadm did not print a join command. Run `kubeadm token create
+      --print-join-command` on {{ dgx_control_plane }} and check its output.
+    quiet: true
+  run_once: true
+
+- name: Join this worker
+  ansible.builtin.command:
+    argv: "{{ dgx_join_command.stdout.split() + ['--cri-socket', 'unix:///run/containerd/containerd.sock'] }}"
+  become: true
+  register: dgx_join_run
+  changed_when: dgx_join_run.rc == 0
+  no_log: true
+  when:
+    - not (dgx_join_is_control_plane | bool)
+    - not dgx_join_kubelet_conf.stat.exists
+
+- name: Wait for the node to register
+  ansible.builtin.command:
+    argv: [kubectl, get, node, "{{ inventory_hostname }}", -o, name]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_join_node
+  changed_when: false
+  retries: 30
+  delay: 10
+  until: dgx_join_node.rc == 0
+  delegate_to: "{{ dgx_control_plane }}"
+  when:
+    - not (dgx_join_is_control_plane | bool)
+    - not dgx_join_kubelet_conf.stat.exists
+
+- name: Report the node state
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{ 'control plane (skipped)' if dgx_join_is_control_plane | bool
+         else ('already joined (skipped)' if dgx_join_kubelet_conf.stat.exists
+               else 'joined') }}

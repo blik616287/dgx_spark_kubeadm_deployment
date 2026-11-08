@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dgx10-overview
+  namespace: {{ dgx_observability_namespace }}
+  labels:
+    grafana_dashboard: "1"
+data:
+  dgx10-overview.json: |
+    {
+      "title": "DGX Spark overview",
+      "uid": "dgx10-overview",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "GPU utilization",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (gpu) (DCGM_FI_DEV_GPU_UTIL)",
+              "legendFormat": "GPU {{ '{{' }}gpu{{ '}}' }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "percent", "max": 100, "min": 0},
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU memory used",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (gpu) (DCGM_FI_DEV_FB_USED) * 1024 * 1024",
+              "legendFormat": "GPU {{ '{{' }}gpu{{ '}}' }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "bytes"},
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Model pods not running",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "count by (namespace) (kube_pod_status_phase{namespace=\"{{ dgx_models_namespace }}\",phase!=\"Running\"} == 1)",
+              "legendFormat": "{{ '{{' }}namespace{{ '}}' }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "short"},
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Container restarts",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (pod) (increase(kube_pod_container_status_restarts_total{namespace=\"{{ dgx_models_namespace }}\"}[1h]))",
+              "legendFormat": "{{ '{{' }}pod{{ '}}' }}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "short"},
+            "overrides": []
+          }
+        }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROMETHEUS",
+            "label": "Prometheus",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": {}
+          }
+        ]
+      }
+    }

@@ -1,0 +1,125 @@
+---
+# Functional probes: every served model is asked for a completion, and for
+# each capability its catalog entry claims. The smoke test earlier in this role
+# proves one model answers; this proves each one does, and records the
+# evidence as JSON and Markdown next to the other reports.
+
+- name: Describe one probe per resolved model
+  ansible.builtin.set_fact:
+    dgx_probe_models: >-
+      {{ dgx_probe_models | default([]) + [{
+        'name': item.key,
+        'engine': item.value.engine,
+        'tag': item.value.tag,
+        'port': item.value.port | int,
+        'deployment': (item.key ~ '-predictor')
+                      if item.value.engine == 'ollama' else item.key,
+        'capability_args': item.value.capabilities
+                           | map('regex_replace', '^', '--capability=') | list,
+        'flags': (['--long-context'] if dgx_verify_long_context | bool else [])
+                 + (['--structured'] if dgx_verify_structured | bool else [])
+                 + (['--strict-tools'] if dgx_verify_strict_tools | bool else [])
+                 + (['--strict-structured']
+                    if dgx_verify_strict_structured | bool else [])
+      }] }}
+  loop: "{{ dgx_catalog_meta | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy the functional probe to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_framework_dir }}/lib/dgxprobe.py"
+    dest: "{{ dgx_remote_state_dir }}/dgxprobe.py"
+    mode: "0755"
+
+- name: Probe each served model through its OpenAI-compatible API
+  ansible.builtin.command:
+    argv: "{{ [dgx_probe_python | default('python3'),
+               dgx_remote_state_dir + '/dgxprobe.py',
+               '--namespace', dgx_models_namespace,
+               '--deployment', item.deployment,
+               '--model', item.tag,
+               '--port', item.port | string,
+               '--engine', item.engine,
+               '--timeout', dgx_verify_probe_timeout | string,
+               '--warmup', dgx_verify_warmup | string,
+               '--keep-alive', dgx_ollama_keep_alive | string]
+              + item.capability_args + item.flags }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_probe_models }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dgx_probe_runs
+  changed_when: false
+  failed_when: false
+
+- name: Parse the probe reports
+  ansible.builtin.set_fact:
+    dgx_probe_reports: >-
+      {{ dgx_probe_reports | default([]) +
+         [((item.stdout | from_json)
+           if (item.stdout | default('') | trim) | length > 0
+           else {'model': item.item.name, 'ok': false,
+                 'error': item.stderr | default('the probe produced no output')})] }}
+  loop: "{{ dgx_probe_runs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Assemble the verification report
+  ansible.builtin.set_fact:
+    dgx_verify_report:
+      stamp: "{{ dgx_report_stamp }}"
+      models: "{{ dgx_served_models }}"
+      plan: "{{ dgx_catalog_resolution.plan }}"
+      probes: "{{ dgx_probe_reports }}"
+      ok: "{{ dgx_probe_reports | rejectattr('ok') | list | length == 0 }}"
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write the verification report as JSON
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/verify-{{ dgx_report_stamp }}.json"
+    mode: "0644"
+    content: "{{ dgx_verify_report | to_nice_json }}\n"
+  delegate_to: localhost
+
+- name: Keep a stable copy for the power report and other readers
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/verify-latest.json"
+    mode: "0644"
+    content: "{{ dgx_verify_report | to_nice_json }}\n"
+  delegate_to: localhost
+
+- name: Write the verification report as Markdown
+  ansible.builtin.template:
+    src: report.md.j2
+    dest: "{{ dgx_report_dir }}/verify-{{ dgx_report_stamp }}.md"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Show the probe results
+  ansible.builtin.debug:
+    msg: "{{ dgx_probe_reports | map('to_json') | list }}"
+
+- name: Require every hard probe check to pass
+  ansible.builtin.assert:
+    that:
+      - dgx_probe_reports | rejectattr('ok') | list | length == 0
+    fail_msg: >-
+      At least one model failed a hard check. See
+      {{ dgx_report_dir }}/verify-{{ dgx_report_stamp }}.md. Pass
+      dgx_verify_allow_fail=true to record the result without stopping.
+    quiet: true
+  when: not (dgx_verify_allow_fail | bool)

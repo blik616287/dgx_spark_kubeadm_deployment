@@ -1,0 +1,101 @@
+# Default-deny ingress, then the narrow paths the stack actually needs.
+# Egress is limited to DNS and HTTPS (the latter only when enabled), because a
+# model runtime that can reach arbitrary hosts is an exfiltration path.
+{% for ns in dgx_security_allow_namespaces %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+{% endfor %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-model-ingress
+  namespace: {{ dgx_models_namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+{% for cidr in dgx_security_probe_cidrs %}
+    - from:
+        - ipBlock:
+            cidr: {{ cidr }}
+      ports:
+{% for port in dgx_security_model_ports %}
+        - protocol: TCP
+          port: {{ port }}
+{% endfor %}
+{% endfor %}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ dgx_gateway_namespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ dgx_models_namespace }}
+      ports:
+{% for port in dgx_security_model_ports %}
+        - protocol: TCP
+          port: {{ port }}
+{% endfor %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: {{ dgx_models_namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{% if dgx_security_allow_egress_443 %}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+{% endif %}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-egress
+  namespace: {{ dgx_gateway_namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ dgx_models_namespace }}
+      ports:
+{% for port in dgx_security_model_ports %}
+        - protocol: TCP
+          port: {{ port }}
+{% endfor %}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

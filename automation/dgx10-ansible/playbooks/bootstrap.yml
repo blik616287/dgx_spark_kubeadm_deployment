@@ -1,0 +1,9 @@
+---
+# Prerequisites only: gate the host, install ansible, check out the pinned repo.
+# Safe to re-run; changes nothing on the cluster.
+- name: Bootstrap the dgx10 target
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_preflight
+    - dgx_repo

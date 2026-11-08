@@ -1,0 +1,54 @@
+---
+# Resolve a profile or an explicit catalog selection into the variables the
+# model roles consume. This role changes nothing on the cluster and nothing on
+# the target: it is the single translation point between catalog/models.yaml
+# and dgx_models_enabled / dgx_extra_models / dgx_engine_models.
+#
+# With both dgx_profile and dgx_catalog_models empty the hand-written selection
+# in group_vars stays in charge. The planner still runs so callers get a plan
+# and a capability map for the models they named.
+
+- name: Resolve the catalog selection
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, dgx_plan_script, 'resolve', '--json']
+              + dgx_plan_selection }}"
+  delegate_to: localhost
+  register: dgx_catalog_run
+  changed_when: false
+  failed_when: false
+
+- name: Fail with the catalog error
+  ansible.builtin.fail:
+    msg: >-
+      {{ dgx_catalog_run.stderr | default('the catalog resolver produced no output') }}
+  when: dgx_catalog_run.stdout | trim == ''
+
+- name: Parse the resolution
+  ansible.builtin.set_fact:
+    dgx_catalog_resolution: "{{ dgx_catalog_run.stdout | from_json }}"
+    dgx_catalog_meta: "{{ (dgx_catalog_run.stdout | from_json).catalog }}"
+    dgx_plan_result: "{{ dgx_catalog_run.stdout | from_json }}"
+
+- name: Adopt the resolved model set when one was selected
+  ansible.builtin.set_fact:
+    dgx_models_enabled: "{{ dgx_catalog_resolution.models_enabled }}"
+    dgx_extra_models: "{{ dgx_catalog_resolution.extra_models }}"
+    dgx_engine_models: "{{ dgx_catalog_resolution.engine_models }}"
+    dgx_served_models: "{{ dgx_catalog_resolution.models }}"
+  when: >-
+    (dgx_profile | length > 0) or (dgx_catalog_models | length > 0)
+
+- name: Record non-Ollama engines even when the selection was hand-written
+  ansible.builtin.set_fact:
+    dgx_engine_models: "{{ dgx_catalog_resolution.engine_models }}"
+  when: >-
+    (dgx_profile | length == 0) and (dgx_catalog_models | length == 0)
+
+- name: Require something to serve
+  ansible.builtin.assert:
+    that:
+      - dgx_served_models | length > 0
+    fail_msg: >-
+      The resolved selection is empty. Choose a profile that serves at least
+      one model, or enable a base model in dgx_models_enabled.
+    quiet: true

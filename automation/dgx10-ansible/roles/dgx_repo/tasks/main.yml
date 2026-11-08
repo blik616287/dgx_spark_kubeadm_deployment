@@ -1,0 +1,52 @@
+---
+# The upstream repo is the deployment definition. We pin it so a re-run cannot
+# silently pick up a changed chart, and we run its playbooks from inside the
+# checkout because deploy-models.yml resolves the chart with playbook_dir.
+
+- name: Ensure the checkout directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_repo_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check out the pinned upstream revision
+  ansible.builtin.git:
+    repo: "{{ dgx_repo_url }}"
+    dest: "{{ dgx_repo_dir }}"
+    version: "{{ dgx_repo_ref }}"
+    force: "{{ dgx_repo_force }}"
+    update: true
+
+- name: Stat the files this framework invokes
+  ansible.builtin.stat:
+    path: "{{ dgx_repo_dir }}/{{ item }}"
+  loop:
+    - "{{ dgx_inner_inventory }}"
+    - "{{ dgx_k8s_playbook }}"
+    - "{{ dgx_download_playbook }}"
+    - "{{ dgx_deploy_playbook }}"
+  register: dgx_repo_files
+
+- name: Fail if the pinned revision is missing an expected file
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: >-
+      {{ item.item }} is missing from {{ dgx_repo_ref }}. The framework pins a
+      revision whose layout it knows; bump dgx_repo_ref and re-check the
+      variable names in group_vars/all.yml.
+    quiet: true
+  loop: "{{ dgx_repo_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Record the checked-out revision for the run log
+  ansible.builtin.command: git rev-parse HEAD
+  args:
+    chdir: "{{ dgx_repo_dir }}"
+  register: dgx_repo_head
+  changed_when: false
+
+- name: Report the revision
+  ansible.builtin.debug:
+    msg: "upstream {{ dgx_repo_url }} @ {{ dgx_repo_head.stdout }} in {{ dgx_repo_dir }}"

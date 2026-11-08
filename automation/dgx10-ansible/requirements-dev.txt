@@ -1,0 +1,7 @@
+# Development and CI toolchain. Nothing here runs on the DGX: the target gets
+# whatever ansible the bootstrap role installs.
+#
+# ansible-core 2.18 is the version the framework is developed and syntax-checked
+# against; PyYAML is pinned because the planner imports it directly.
+ansible-core==2.18.6
+PyYAML==6.0.3

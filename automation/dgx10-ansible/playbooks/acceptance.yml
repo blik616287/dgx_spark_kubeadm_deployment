@@ -1,0 +1,18 @@
+---
+# The live acceptance run. Every role here is set to record rather than stop,
+# and dgx_acceptance makes one decision at the end. Use it when you want the
+# full picture; `make verify` is the shorter gate inside `make up`.
+- name: Accept the dgx10 deployment
+  hosts: dgx
+  gather_facts: true
+  vars:
+    dgx_verify_allow_fail: true
+    dgx_doctor_allow_errors: true
+    dgx_eval_allow_fail: true
+  roles:
+    - dgx_catalog
+    - dgx_verify
+    - dgx_doctor
+    - role: dgx_eval
+      when: dgx_eval_enabled | bool
+    - dgx_acceptance

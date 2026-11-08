@@ -1,0 +1,7 @@
+---
+# Tokens per joule and dollars per million tokens, from the last verify report.
+- name: Report power and cost per token
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_power

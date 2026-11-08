@@ -1,0 +1,209 @@
+---
+# An OpenAI-compatible gateway in front of every served model. Clients point
+# at one base URL and one key; the gateway chooses the upstream. It also gives
+# a single place to record usage and to add auth, which the per-model services
+# do not have.
+
+- name: Require a master key before deploying the gateway
+  ansible.builtin.assert:
+    that:
+      - dgx_gateway_master_key | length >= 16
+    fail_msg: >-
+      dgx_gateway_master_key is empty or too short. Export
+      DGX_GATEWAY_MASTER_KEY (16+ characters) or pass
+      -e dgx_gateway_master_key=... . The gateway is not deployed without one:
+      an unauthenticated OpenAI endpoint on the LAN is worse than no gateway.
+    quiet: true
+
+- name: Choose the replacement master key
+  ansible.builtin.set_fact:
+    dgx_gateway_new_key: >-
+      {{ dgx_gateway_new_key if dgx_gateway_new_key | length > 0
+         else lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}
+  no_log: true
+  when: dgx_gateway_rotate | bool
+
+- name: Adopt the replacement key for this run
+  ansible.builtin.set_fact:
+    dgx_gateway_master_key: "{{ dgx_gateway_new_key }}"
+  no_log: true
+  when: dgx_gateway_rotate | bool
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  when: dgx_gateway_rotate | bool
+
+- name: Save the replacement key where the operator can retrieve it
+  ansible.builtin.copy:
+    content: "{{ dgx_gateway_new_key }}\n"
+    dest: "{{ dgx_gateway_key_file }}"
+    mode: "0600"
+  delegate_to: localhost
+  no_log: true
+  when: dgx_gateway_rotate | bool
+
+- name: Ensure the gateway namespace exists
+  ansible.builtin.command:
+    argv: [kubectl, create, namespace, "{{ dgx_gateway_namespace }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_ns
+  changed_when: dgx_gateway_ns.rc == 0
+  failed_when:
+    - dgx_gateway_ns.rc != 0
+    - "'AlreadyExists' not in dgx_gateway_ns.stderr"
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render the model list from the resolved catalog
+  ansible.builtin.template:
+    src: litellm-config.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/litellm-config.yaml"
+    mode: "0644"
+
+- name: Apply the gateway configuration
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/litellm-config.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_config
+  changed_when: "'unchanged' not in dgx_gateway_config.stdout"
+
+- name: Render the master-key Secret
+  ansible.builtin.template:
+    src: litellm-secret.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/litellm-secret.yaml"
+    mode: "0600"
+  no_log: true
+
+- name: Apply the master-key Secret
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/litellm-secret.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_secret
+  changed_when: "'unchanged' not in dgx_gateway_secret.stdout"
+  no_log: true
+
+- name: Remove the rendered Secret from disk
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}/litellm-secret.yaml"
+    state: absent
+
+- name: Restart the gateway to pick up a rotated key
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_gateway_namespace }}", rollout, restart,
+           deployment/litellm]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  changed_when: true
+  when: dgx_gateway_rotate | bool
+
+- name: Wait for the gateway to roll out
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_gateway_namespace }}", rollout, status,
+           "deployment/litellm", "--timeout={{ dgx_gateway_rollout_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_rollout
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: dgx_gateway_rollout.rc == 0
+
+- name: Collect the gateway endpoints
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_gateway_namespace }}", get, svc, litellm, -o, json]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_svc
+  changed_when: false
+
+- name: Resolve the port clients use
+  ansible.builtin.set_fact:
+    dgx_gateway_client_port: >-
+      {{ (dgx_gateway_svc.stdout | from_json).spec.ports[0].nodePort
+         if dgx_gateway_node_port | int > 0
+         else (dgx_gateway_svc.stdout | from_json).spec.ports[0].port }}
+
+- name: Record where clients should connect
+  ansible.builtin.set_fact:
+    dgx_gateway_endpoint: >-
+      http://{{ dgx_gateway_hostname if dgx_gateway_hostname | length > 0
+                else (ansible_host | default(inventory_hostname)) }}:{{ dgx_gateway_client_port }}/v1
+
+- name: Require a host and an issuer for TLS
+  ansible.builtin.assert:
+    that:
+      - dgx_gateway_host | length > 0
+      - dgx_gateway_cluster_issuer | length > 0
+    fail_msg: >-
+      dgx_gateway_tls is true but dgx_gateway_host or
+      dgx_gateway_cluster_issuer is empty. Set the public name and the
+      cert-manager ClusterIssuer, or leave dgx_gateway_tls false and
+      port-forward instead.
+    quiet: true
+  when: dgx_gateway_tls | bool
+
+- name: Render the Ingress and Certificate
+  ansible.builtin.template:
+    src: ingress.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/gateway-ingress.yaml"
+    mode: "0644"
+  when: dgx_gateway_tls | bool
+
+- name: Apply the Ingress and Certificate
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/gateway-ingress.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_gateway_ingress
+  changed_when: "'created' in dgx_gateway_ingress.stdout or 'configured' in dgx_gateway_ingress.stdout"
+  when: dgx_gateway_tls | bool
+
+- name: Point clients at the TLS endpoint
+  ansible.builtin.set_fact:
+    dgx_gateway_endpoint: "https://{{ dgx_gateway_host }}/v1"
+  when: dgx_gateway_tls | bool
+
+- name: Ensure the client recipe directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_gateway_client_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Write the client recipes
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ dgx_gateway_client_dir }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - README.md
+    - client.env
+    - python_example.py
+    - curl_example.sh
+  delegate_to: localhost
+
+- name: Show the gateway endpoint
+  ansible.builtin.debug:
+    msg:
+      - "Gateway: {{ dgx_gateway_endpoint }}"
+      - "Models: {{ dgx_served_models | join(', ') }}"
+      - "Client recipes: {{ dgx_gateway_client_dir }}"
+
+- name: Show where the rotated key was saved
+  ansible.builtin.debug:
+    msg: >-
+      The gateway master key was replaced. The new key is in
+      {{ dgx_gateway_key_file }} (mode 0600, outside the repo); export it as
+      DGX_GATEWAY_MASTER_KEY for later runs.
+  when: dgx_gateway_rotate | bool

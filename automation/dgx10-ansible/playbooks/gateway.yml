@@ -1,0 +1,10 @@
+---
+# OpenAI-compatible gateway in front of the served models. Needs
+# DGX_GATEWAY_MASTER_KEY (or -e dgx_gateway_master_key=...).
+- name: Install the model gateway
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - role: dgx_gateway
+      when: dgx_gateway_enabled | bool

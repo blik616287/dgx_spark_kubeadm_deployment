@@ -1,0 +1,9 @@
+---
+# NetworkPolicy and licence notices. Reports whether the CNI enforces policy.
+- name: Harden the serving namespaces
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - role: dgx_security
+      when: dgx_security_enabled | bool

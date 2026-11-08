@@ -1,0 +1,7 @@
+---
+# Longhorn snapshot or backup of the model PVCs.
+- name: Protect the model volumes
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_backup

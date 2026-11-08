@@ -1,0 +1,123 @@
+---
+# The eval report card: a small fixed suite per chat model, recorded as JSON
+# and Markdown so a weights or runtime change is visible as a diff.
+
+- name: Select the chat models to evaluate
+  ansible.builtin.set_fact:
+    dgx_eval_targets: >-
+      {{ dgx_catalog_meta | dict2items
+         | selectattr('key', 'in', dgx_served_models)
+         | selectattr('value.capabilities', 'contains', 'chat') | list }}
+
+- name: Say when nothing can be evaluated
+  ansible.builtin.debug:
+    msg: No chat models in this selection; the eval suite has nothing to run.
+  when: dgx_eval_targets | length == 0
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+  when: dgx_eval_targets | length > 0
+
+- name: Copy the eval and its probe dependency to the target
+  ansible.builtin.copy:
+    src: "{{ dgx_framework_dir }}/lib/{{ item }}"
+    dest: "{{ dgx_remote_state_dir }}/{{ item }}"
+    mode: "0755"
+  loop:
+    - dgxeval.py
+    - dgxprobe.py
+  when: dgx_eval_targets | length > 0
+
+- name: Run the report card per chat model
+  ansible.builtin.command:
+    argv: "{{ [dgx_probe_python | default('python3'),
+               dgx_remote_state_dir + '/dgxeval.py',
+               '--namespace', dgx_models_namespace,
+               '--deployment', (item.key ~ '-predictor') if item.value.engine == 'ollama' else item.key,
+               '--model', item.value.tag,
+               '--port', item.value.port | string,
+               '--engine', item.value.engine,
+               '--timeout', dgx_eval_timeout | string] }}"
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  loop: "{{ dgx_eval_targets }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: dgx_eval_runs
+  changed_when: false
+  failed_when: false
+  when: dgx_eval_targets | length > 0
+
+- name: Parse the report cards
+  ansible.builtin.set_fact:
+    dgx_eval_reports: >-
+      {{ dgx_eval_reports | default([]) +
+         [((item.stdout | from_json)
+           if (item.stdout | default('') | trim) | length > 0
+           else {'model': item.item.key, 'score': 0.0, 'passed': 0, 'total': 0,
+                 'cases': [], 'error': item.stderr | default('the eval produced no output')})] }}
+  loop: "{{ dgx_eval_runs.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+
+- name: Assemble the eval report
+  ansible.builtin.set_fact:
+    dgx_eval_result:
+      stamp: "{{ dgx_report_stamp }}"
+      models: "{{ dgx_eval_reports | map(attribute='model') | list }}"
+      reports: "{{ dgx_eval_reports }}"
+      floor: "{{ dgx_eval_min_score | float }}"
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  when: dgx_eval_targets | length > 0
+
+- name: Write the eval report as JSON
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/eval-{{ dgx_report_stamp }}.json"
+    mode: "0644"
+    content: "{{ dgx_eval_result | to_nice_json }}\n"
+  delegate_to: localhost
+  when: dgx_eval_targets | length > 0
+
+- name: Keep a stable copy
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/eval-latest.json"
+    mode: "0644"
+    content: "{{ dgx_eval_result | to_nice_json }}\n"
+  delegate_to: localhost
+  when: dgx_eval_targets | length > 0
+
+- name: Write the eval report as Markdown
+  ansible.builtin.template:
+    src: report.md.j2
+    dest: "{{ dgx_report_dir }}/eval-{{ dgx_report_stamp }}.md"
+    mode: "0644"
+  delegate_to: localhost
+  when: dgx_eval_targets | length > 0
+
+- name: Show the scores
+  ansible.builtin.debug:
+    msg: >-
+      {{ dgx_eval_reports | map(attribute='model') | zip(
+           dgx_eval_reports | map(attribute='score')) | map('join', ': ') | list }}
+
+- name: Hold the models to the score floor
+  ansible.builtin.assert:
+    that:
+      - dgx_eval_reports | selectattr('score', 'lessthan', dgx_eval_min_score | float) | list | length == 0
+    fail_msg: >-
+      At least one model scored below {{ dgx_eval_min_score }}. See
+      {{ dgx_report_dir }}/eval-{{ dgx_report_stamp }}.md. Lower
+      dgx_eval_min_score or pass dgx_eval_allow_fail=true to record it.
+    quiet: true
+  when:
+    - dgx_eval_targets | length > 0
+    - not (dgx_eval_allow_fail | bool)

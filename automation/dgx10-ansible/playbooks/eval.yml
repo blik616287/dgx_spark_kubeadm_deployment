@@ -1,0 +1,9 @@
+---
+# The eval report card for the chat models in the selection.
+- name: Evaluate the served models
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_catalog
+    - role: dgx_eval
+      when: dgx_eval_enabled | bool

@@ -1,0 +1,105 @@
+---
+# Three steps: pull the base pair's weights, install the cluster prerequisites
+# and the initial release (deploy-models.yml), then hand the final model set to
+# dgx_multimodel. The last step is authoritative: it renders a values file from
+# the chart's own defaults plus every extra model and applies it, so the served
+# set is whatever `dgx_models_enabled` + `dgx_extra_models` say, not whatever
+# the previous release happened to contain.
+
+# Validate the catalog before the download playbook, so a bad model selection
+# costs seconds instead of a multi-hour pull.
+- name: Reject a string-form model selection
+  ansible.builtin.assert:
+    that:
+      - dgx_models_enabled is none or dgx_models_enabled is not string
+    fail_msg: >-
+      dgx_models_enabled parsed as a string, which would substring-match model
+      names instead of selecting them. Ansible does not coerce `-e key=[a]`;
+      pass JSON instead: -e '{"dgx_models_enabled": ["a"]}', or use
+      `make models MODELS='["a"]'`.
+    quiet: true
+
+- name: Require a non-empty served set
+  ansible.builtin.assert:
+    that:
+      - dgx_served_models | length > 0
+    fail_msg: >-
+      Nothing would be served: dgx_models_enabled and dgx_extra_models are both
+      empty.
+    quiet: true
+
+- name: Fail before the download if the catalog exceeds the GPU budget
+  ansible.builtin.assert:
+    that:
+      - dgx_served_models | length <= dgx_max_gpu_pods | int
+    fail_msg: >-
+      {{ dgx_served_models | length }} models are enabled
+      ({{ dgx_served_models | join(', ') }}) but install-k8s.yml grants
+      {{ dgx_max_gpu_pods }} time-sliced GPU replicas. Disable a model or raise
+      the time-slicing count in the upstream install.
+    quiet: true
+
+- name: "Run the weight-download playbook: {{ dgx_download_playbook }}"
+  ansible.builtin.command:
+    argv:
+      - ansible-playbook
+      - -i
+      - "{{ dgx_inner_inventory }}"
+      - "{{ dgx_download_playbook }}"
+      - --become
+      - -e
+      - "local_user={{ dgx_local_user }}"
+      - -e
+      - "kubeconfig={{ dgx_kubeconfig }}"
+  args:
+    chdir: "{{ dgx_repo_dir }}"
+  environment:
+    ANSIBLE_HOST_KEY_CHECKING: "false"
+    ANSIBLE_FORCE_COLOR: "false"
+  register: dgx_download_run
+  changed_when: true
+
+- name: Fail with the tail of the download output
+  ansible.builtin.fail:
+    msg: |
+      {{ dgx_download_playbook }} failed (rc={{ dgx_download_run.rc }}).
+      --- last 40 lines ---
+      {{ dgx_download_run.stdout_lines[-40:] | join('\n') }}
+      --- stderr ---
+      {{ dgx_download_run.stderr }}
+  when: dgx_download_run.rc != 0
+
+- name: "Run the deploy playbook: {{ dgx_deploy_playbook }}"
+  ansible.builtin.command:
+    argv:
+      - ansible-playbook
+      - -i
+      - "{{ dgx_inner_inventory }}"
+      - "{{ dgx_deploy_playbook }}"
+      - --become
+      - -e
+      - "local_user={{ dgx_local_user }}"
+      - -e
+      - "kubeconfig={{ dgx_kubeconfig }}"
+  args:
+    chdir: "{{ dgx_repo_dir }}"
+  environment:
+    ANSIBLE_HOST_KEY_CHECKING: "false"
+    ANSIBLE_FORCE_COLOR: "false"
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_deploy_run
+  changed_when: true
+
+- name: Fail with the tail of the deploy output
+  ansible.builtin.fail:
+    msg: |
+      {{ dgx_deploy_playbook }} failed (rc={{ dgx_deploy_run.rc }}).
+      --- last 40 lines ---
+      {{ dgx_deploy_run.stdout_lines[-40:] | join('\n') }}
+      --- stderr ---
+      {{ dgx_deploy_run.stderr }}
+  when: dgx_deploy_run.rc != 0
+
+- name: Deploy the selected model set (base + extra models)
+  ansible.builtin.import_role:
+    name: dgx_multimodel

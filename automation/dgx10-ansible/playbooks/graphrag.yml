@@ -1,0 +1,51 @@
+---
+# Optional GraphRAG stack. It builds from apps/ inside the checkout, which is
+# why the framework runs it on the target rather than importing it.
+- name: Deploy the GraphRAG stack on dgx10
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_repo
+  tasks:
+    - name: Stat the GraphRAG playbook
+      ansible.builtin.stat:
+        path: "{{ dgx_repo_dir }}/{{ dgx_graphrag_playbook }}"
+      register: dgx_graphrag_file
+
+    - name: Fail if this revision has no GraphRAG playbook
+      ansible.builtin.assert:
+        that:
+          - dgx_graphrag_file.stat.exists
+        fail_msg: "{{ dgx_graphrag_playbook }} is not present at {{ dgx_repo_ref }}."
+        quiet: true
+
+    - name: "Run the GraphRAG playbook on the target: {{ dgx_graphrag_playbook }}"
+      ansible.builtin.command:
+        argv:
+          - ansible-playbook
+          - -i
+          - "{{ dgx_inner_inventory }}"
+          - "{{ dgx_graphrag_playbook }}"
+          - --become
+          - -e
+          - "local_user={{ dgx_local_user }}"
+          - -e
+          - "kubeconfig={{ dgx_kubeconfig }}"
+      args:
+        chdir: "{{ dgx_repo_dir }}"
+      environment:
+        ANSIBLE_HOST_KEY_CHECKING: "false"
+        ANSIBLE_FORCE_COLOR: "false"
+        KUBECONFIG: "{{ dgx_kubeconfig }}"
+      register: dgx_graphrag_run
+      changed_when: true
+
+    - name: Fail with the tail of the GraphRAG output
+      ansible.builtin.fail:
+        msg: |
+          {{ dgx_graphrag_playbook }} failed (rc={{ dgx_graphrag_run.rc }}).
+          --- last 40 lines ---
+          {{ dgx_graphrag_run.stdout_lines[-40:] | join('\n') }}
+          --- stderr ---
+          {{ dgx_graphrag_run.stderr }}
+      when: dgx_graphrag_run.rc != 0

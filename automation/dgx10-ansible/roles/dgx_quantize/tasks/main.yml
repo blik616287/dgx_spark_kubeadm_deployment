@@ -1,0 +1,117 @@
+---
+# Experimental in-cluster quantisation: download the HuggingFace snapshot into
+# an emptyDir, convert and quantise with llama.cpp, write the GGUF to a PVC.
+#
+# Double-gated on purpose: it pulls tens of gigabytes, writes a new artifact,
+# and a wrong output type silently produces an unusable model. Nothing else in
+# the framework runs it, and no other role depends on its output.
+
+- name: Refuse to run without the explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - dgx_quantize_confirm | bool
+      - dgx_quantize_model | length > 0
+      - dgx_quantize_pvc | length > 0
+    fail_msg: >-
+      Quantisation is experimental and off by default. Pass
+      -e dgx_quantize_confirm=true -e dgx_quantize_model=<hf-repo>
+      -e dgx_quantize_pvc=<pvc> to run it.
+    quiet: true
+
+- name: Ensure the remote state directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_remote_state_dir }}"
+    state: directory
+    mode: "0755"
+
+# The quantise image is a different binary set from the serving image, and a
+# wrong-architecture image fails inside the Job after a long download. Ask the
+# registry first; a controller without egress gets a warning, not a block.
+- name: Check the quantise image publishes linux/arm64
+  ansible.builtin.command:
+    argv: [ansible_playbook_python, dgx_framework_dir + '/lib/registry.py',
+           '--image', dgx_quantize_image, '--arch', 'arm64']
+  delegate_to: localhost
+  register: dgx_quantize_arch
+  changed_when: false
+  failed_when: false
+  when: dgx_quantize_check_arch | bool
+
+- name: Stop when the quantise image cannot run on the DGX
+  ansible.builtin.assert:
+    that:
+      - (dgx_quantize_arch.stdout | from_json | first).supports_arch | default(none) is not sameas false
+    fail_msg: >-
+      {{ dgx_quantize_image }} publishes no linux/arm64 manifest, so the Job
+      would fail on the DGX Spark. Choose an arm64 image or set
+      dgx_quantize_check_arch=false to skip this check.
+    quiet: true
+  when: dgx_quantize_check_arch | bool
+
+- name: Warn when the registry could not be asked
+  ansible.builtin.debug:
+    msg: >-
+      Could not verify the quantise image architecture:
+      {{ (dgx_quantize_arch.stdout | from_json | first).error | default('no answer') }}.
+      Continuing; the Job will fail at pull time if the image is wrong.
+  when:
+    - dgx_quantize_check_arch | bool
+    - (dgx_quantize_arch.stdout | from_json | first).error | default('') | length > 0
+
+- name: Render the quantise Job
+  ansible.builtin.template:
+    src: job.yaml.j2
+    dest: "{{ dgx_remote_state_dir }}/quantize-job.yaml"
+    mode: "0644"
+
+- name: Delete a previous run so the Job can be recreated
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_quantize_namespace }}", delete, job,
+           "dgx-quantize", "--ignore-not-found"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  changed_when: false
+
+- name: Create the quantise Job
+  ansible.builtin.command:
+    argv: [kubectl, apply, -f, "{{ dgx_remote_state_dir }}/quantize-job.yaml"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_quantize_apply
+  changed_when: "'created' in dgx_quantize_apply.stdout"
+
+- name: Wait for the Job to finish
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_quantize_namespace }}", wait,
+           "job/dgx-quantize", "--for=condition=complete",
+           "--timeout={{ dgx_quantize_timeout }}"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_quantize_wait
+  changed_when: false
+  failed_when: false
+
+- name: Show the Job logs when it did not complete
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ dgx_quantize_namespace }}", logs,
+           "job/dgx-quantize", "--tail=80"]
+  environment:
+    KUBECONFIG: "{{ dgx_kubeconfig }}"
+  register: dgx_quantize_logs
+  changed_when: false
+  failed_when: false
+  when: dgx_quantize_wait.rc != 0
+
+- name: Report the failure with the logs
+  ansible.builtin.fail:
+    msg: |
+      The quantise Job did not complete (rc={{ dgx_quantize_wait.rc }}).
+      --- logs ---
+      {{ dgx_quantize_logs.stdout | default('no logs') }}
+  when: dgx_quantize_wait.rc != 0
+
+- name: Show the output location
+  ansible.builtin.debug:
+    msg: >-
+      Wrote {{ dgx_quantize_outtype }} to
+      pvc/{{ dgx_quantize_pvc }}:/quantized/{{ dgx_quantize_model | replace('/', '_') }}-{{ dgx_quantize_outtype }}.gguf

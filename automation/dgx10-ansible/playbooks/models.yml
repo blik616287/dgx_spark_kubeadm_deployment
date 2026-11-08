@@ -1,0 +1,10 @@
+---
+# download-models.yml + deploy-models.yml, then reconcile the model set.
+# Assumes k8s.yml has already run.
+- name: Download and serve models on dgx10
+  hosts: dgx
+  gather_facts: true
+  roles:
+    - dgx_repo
+    - dgx_catalog
+    - dgx_models

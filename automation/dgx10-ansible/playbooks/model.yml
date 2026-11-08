@@ -1,0 +1,29 @@
+---
+# Add one catalog model to the declared set and reconcile. The declared set is
+# group_vars plus MODEL; this does not introspect the cluster, so a profile
+# deployment should be changed by editing the profile instead.
+- name: Add a model to the serving set
+  hosts: dgx
+  gather_facts: true
+  # pre_tasks run before roles; a plain task would run after dgx_catalog had
+  # already resolved the old selection.
+  pre_tasks:
+    - name: Require a model name
+      ansible.builtin.assert:
+        that:
+          - dgx_model_add | length > 0
+        fail_msg: >-
+          Pass MODEL=<catalog-name>, e.g. make model MODEL=qwen3-14b. Run
+          `make plan` first to see whether it fits.
+        quiet: true
+
+    - name: Extend the selection
+      ansible.builtin.set_fact:
+        dgx_catalog_models: "{{ (dgx_served_models + [dgx_model_add]) | unique }}"
+
+  roles:
+    - dgx_repo
+    - dgx_catalog
+    - dgx_multimodel
+    - role: dgx_engines
+      when: dgx_engine_models | length > 0

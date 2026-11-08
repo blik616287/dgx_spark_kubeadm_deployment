@@ -1,0 +1,55 @@
+---
+# Fit a model set against the DGX's unified memory and GPU-slice budget.
+#
+# Everything here runs on the controller with Ansible's own interpreter, so
+# `make plan` is safe before the target exists and before anything is pulled.
+# A FAIL verdict stops the play unless dgx_plan_allow_fail is true; a WARN
+# verdict prints its reasons and continues.
+
+- name: Run the catalog planner
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, dgx_plan_script, 'resolve', '--json']
+              + dgx_plan_selection }}"
+  delegate_to: localhost
+  register: dgx_plan_run
+  changed_when: false
+  failed_when: false
+
+- name: Fail with the planner's error
+  ansible.builtin.fail:
+    msg: >-
+      {{ dgx_plan_run.stderr | default('the planner produced no output') }}
+  when: dgx_plan_run.stdout | trim == ''
+
+- name: Parse the plan
+  ansible.builtin.set_fact:
+    dgx_plan_result: "{{ dgx_plan_run.stdout | from_json }}"
+
+- name: Show the fit table
+  ansible.builtin.debug:
+    msg: "{{ dgx_plan_result.table.splitlines() }}"
+
+- name: Ensure the controller report directory exists
+  ansible.builtin.file:
+    path: "{{ dgx_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Record the plan next to the reports
+  ansible.builtin.copy:
+    dest: "{{ dgx_report_dir }}/plan-latest.txt"
+    mode: "0644"
+    content: "{{ dgx_plan_result.table }}\n"
+  delegate_to: localhost
+
+- name: Stop on a model set that cannot fit
+  ansible.builtin.assert:
+    that:
+      - dgx_plan_result.plan.verdict != 'FAIL'
+    fail_msg: >-
+      The selected set does not fit: {{ dgx_plan_result.plan.reasons | join('; ') }}.
+      Reduce the set, lower the context, or pass dgx_plan_allow_fail=true to
+      see the table without stopping.
+    quiet: true
+  when: not (dgx_plan_allow_fail | bool)
